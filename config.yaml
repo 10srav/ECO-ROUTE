@@ -1,0 +1,140 @@
+# EcoRoute SDN Controller Configuration
+# Energy-Aware Dynamic Traffic Engineering
+
+controller:
+  # OpenFlow settings
+  openflow_version: "1.3"
+  datapath_id: null  # Auto-detect
+
+  # Stats polling interval (seconds)
+  stats_polling_interval: 5
+
+  # Controller REST API port
+  api_port: 8080
+
+ewma:
+  # EWMA smoothing factor (0 < alpha < 1)
+  # Higher alpha = more weight on recent observations
+  alpha: 0.3
+
+  # Adaptive alpha settings
+  adaptive_alpha:
+    enabled: true
+    min_alpha: 0.1
+    max_alpha: 0.7
+    # Increase alpha when traffic variance exceeds this threshold
+    burst_threshold: 0.3
+
+  # Prediction window (seconds)
+  prediction_window: 30
+
+  # Number of time steps to predict ahead
+  prediction_steps: 3
+
+  # History size for predictions
+  history_size: 100
+
+energy:
+  # Sleep threshold - link sleeps if predicted load below this (%)
+  sleep_threshold: 20
+
+  # Wake threshold - link wakes if predicted load exceeds this (%)
+  wake_threshold: 60
+
+  # Minimum time link must stay below sleep threshold (seconds)
+  min_sleep_duration: 30
+
+  # Link wake-up latency (milliseconds)
+  wake_latency_ms: 100
+
+  # QoS constraints
+  qos:
+    # Maximum link utilization (%)
+    max_utilization: 80
+    # Maximum acceptable packet loss (%)
+    max_packet_loss: 0.1
+    # Maximum acceptable latency increase (ms)
+    max_latency_increase: 5
+
+  # Power model (Watts)
+  power_model:
+    # Base power per switch
+    switch_base_power: 50
+    # Power per active port
+    port_power: 5
+    # Power in sleep mode (near zero)
+    sleep_power: 0.5
+
+routing:
+  # Number of shortest paths to consider (Yen's k-shortest)
+  k_paths: 3
+
+  # Path scoring weights
+  scoring:
+    energy_weight: 0.5
+    load_weight: 0.3
+    hop_weight: 0.2
+
+  # Hop penalty factor
+  hop_penalty: 0.1
+
+topology:
+  # Fat-tree parameter (k)
+  fat_tree_k: 4
+
+  # Link bandwidths (Mbps)
+  core_bandwidth: 10000  # 10 Gbps
+  aggregation_bandwidth: 10000  # 10 Gbps
+  edge_bandwidth: 1000  # 1 Gbps
+  host_bandwidth: 1000  # 1 Gbps
+
+  # Link delays (ms)
+  core_delay: "1ms"
+  edge_delay: "2ms"
+
+dashboard:
+  # Flask API settings
+  host: "0.0.0.0"
+  port: 5000
+  debug: false
+
+  # CORS settings
+  cors_origins: ["http://localhost:3000"]
+
+  # Update interval for real-time data (ms)
+  update_interval: 1000
+
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  level: "INFO"
+
+  # Log format
+  format: "json"
+
+  # Log file path
+  file: "logs/ecoroute.log"
+
+  # Max log file size (MB)
+  max_size: 100
+
+  # Number of backup files
+  backup_count: 5
+
+metrics:
+  # Enable metrics collection
+  enabled: true
+
+  # Metrics export path
+  export_path: "logs/metrics.csv"
+
+  # Export interval (seconds)
+  export_interval: 10
+
+  # Metrics to collect
+  collect:
+    - active_ports_ratio
+    - energy_savings
+    - packet_loss
+    - average_latency
+    - throughput
+    - sleep_wake_events

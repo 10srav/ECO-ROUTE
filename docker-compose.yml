@@ -1,0 +1,85 @@
+version: '3.8'
+
+services:
+  # EcoRoute SDN Controller
+  controller:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ecoroute-controller
+    ports:
+      - "6653:6653"    # OpenFlow
+      - "8080:8080"    # Controller REST API
+    volumes:
+      - ./logs:/app/logs
+      - ./config.yaml:/app/config.yaml:ro
+    environment:
+      - PYTHONPATH=/app
+      - LOG_LEVEL=INFO
+    networks:
+      - ecoroute-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.connect(('localhost', 6653)); s.close()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Dashboard API
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ecoroute-dashboard
+    ports:
+      - "5000:5000"    # Dashboard API
+    volumes:
+      - ./logs:/app/logs:ro
+    environment:
+      - PYTHONPATH=/app
+      - CONTROLLER_URL=http://controller:8080
+      - FLASK_ENV=production
+    command: ["python", "dashboard/flask_api.py", "--host", "0.0.0.0", "--port", "5000"]
+    networks:
+      - ecoroute-network
+    depends_on:
+      controller:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # React Frontend (development server)
+  frontend:
+    image: node:18-alpine
+    container_name: ecoroute-frontend
+    working_dir: /app
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./dashboard/frontend:/app
+      - /app/node_modules
+    environment:
+      - REACT_APP_API_URL=http://localhost:5000
+      - CHOKIDAR_USEPOLLING=true
+    command: sh -c "npm install && npm start"
+    networks:
+      - ecoroute-network
+    depends_on:
+      - dashboard
+    profiles:
+      - development
+
+networks:
+  ecoroute-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+volumes:
+  logs:
