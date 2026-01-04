@@ -1,0 +1,66 @@
+{
+  "timestamp": "2026-01-04T16:04:29.370116",
+  "total_tests": 7,
+  "passed_tests": 7,
+  "failed_tests": 0,
+  "overall_pass": true,
+  "recommendations": [],
+  "results": [
+    {
+      "test_name": "Energy Savings",
+      "metric_name": "energy_savings_percent",
+      "target_value": "25.0-35.0%",
+      "actual_value": 25.285714285714285,
+      "passed": true,
+      "details": "Baseline: 1400W, Actual: 1046W"
+    },
+    {
+      "test_name": "Active Ports Ratio (Low Load)",
+      "metric_name": "active_ports_ratio",
+      "target_value": "<40.0%",
+      "actual_value": 1.6666666666666667,
+      "passed": true,
+      "details": "During low load periods"
+    },
+    {
+      "test_name": "Energy Savings",
+      "metric_name": "energy_savings_percent",
+      "target_value": "25.0-35.0%",
+      "actual_value": 25.285714285714285,
+      "passed": true,
+      "details": "Baseline: 1400W, Actual: 1046W"
+    },
+    {
+      "test_name": "Packet Loss During Transitions",
+      "metric_name": "max_packet_loss_percent",
+      "target_value": "<0.1%",
+      "actual_value": 0.04735298284985684,
+      "passed": true,
+      "details": "Avg: 0.0007%, Max: 0.0474%"
+    },
+    {
+      "test_name": "Latency Increase",
+      "metric_name": "max_latency_increase_ms",
+      "target_value": "<5.0ms",
+      "actual_value": 2.9491168894381445,
+      "passed": true,
+      "details": "Avg: 1.50ms, Max: 2.95ms"
+    },
+    {
+      "test_name": "Throughput Ratio",
+      "metric_name": "min_throughput_ratio",
+      "target_value": ">=95.0%",
+      "actual_value": 96.02774730811218,
+      "passed": true,
+      "details": "Avg: 98.2%, Min: 96.0%"
+    },
+    {
+      "test_name": "Prediction Accuracy",
+      "metric_name": "prediction_accuracy_percent",
+      "target_value": ">60.0%",
+      "actual_value": 63.2879624520669,
+      "passed": true,
+      "details": "MAPE: 36.71%"
+    }
+  ]
+}
