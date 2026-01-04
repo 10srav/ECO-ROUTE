@@ -2,6 +2,8 @@
 
 A production-grade Ryu SDN controller that achieves **25-35% network energy savings** by intelligently sleeping unused links during low-load periods while maintaining QoS guarantees.
 
+![EcoRoute Dashboard](dashboard_screenshot.png)
+
 ## Features
 
 - **Predictive EWMA Traffic Forecasting**: Adaptive exponentially weighted moving average with burst detection
