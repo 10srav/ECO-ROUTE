@@ -9,8 +9,10 @@ REST API endpoints for the EcoRoute monitoring dashboard:
 - EWMA predictions
 - QoS metrics
 
+Production-ready: Uses trained EWMA model and realistic traffic simulation.
+
 Usage:
-    python flask_api.py [--port PORT] [--controller-url URL]
+    python flask_api.py [--port PORT] [--controller-url URL] [--use-mock]
 
 Author: EcoRoute Team
 """
@@ -32,6 +34,11 @@ from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 
 import structlog
+
+# Add parent directory for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from dashboard.controller_client import ControllerClient, ControllerConfig
 
 # Configure logging
 structlog.configure(
@@ -57,8 +64,11 @@ CORS(app, resources={r"/api/*": {"origins": "*"}})
 # Initialize SocketIO for real-time updates
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
-# Controller connection (would be replaced with actual RPC in production)
+# Controller connection configuration
 CONTROLLER_URL = os.environ.get('CONTROLLER_URL', 'http://127.0.0.1:8080')
+
+# Global controller client (initialized in main)
+controller_client: Optional[ControllerClient] = None
 
 
 class MockControllerData:
@@ -332,8 +342,16 @@ class MockControllerData:
         }
 
 
-# Initialize mock data
+# Initialize data source (will be replaced by controller_client in main())
 mock_data = MockControllerData()
+
+
+def get_data_source():
+    """Get the appropriate data source (controller client or mock)."""
+    global controller_client
+    if controller_client is not None:
+        return controller_client
+    return mock_data
 
 
 # --- API Routes ---
@@ -358,7 +376,8 @@ def health():
 def get_topology():
     """Get current network topology."""
     try:
-        topology = mock_data.get_topology()
+        data_source = get_data_source()
+        topology = data_source.get_topology()
         return jsonify(topology)
     except Exception as e:
         logger.error("topology_fetch_failed", error=str(e))
@@ -369,13 +388,19 @@ def get_topology():
 def get_stats():
     """Get comprehensive network statistics."""
     try:
-        return jsonify({
-            "energy": mock_data.get_energy_stats(),
-            "predictions": mock_data.get_predictions(),
-            "qos": mock_data.get_qos_metrics(),
-            "ecmp_comparison": mock_data.get_ecmp_comparison(),
-            "timestamp": time.time()
-        })
+        data_source = get_data_source()
+        if hasattr(data_source, 'get_all_stats'):
+            # Use ControllerClient's comprehensive stats
+            return jsonify(data_source.get_all_stats())
+        else:
+            # Fallback to mock data format
+            return jsonify({
+                "energy": data_source.get_energy_stats(),
+                "predictions": data_source.get_predictions(),
+                "qos": data_source.get_qos_metrics(),
+                "ecmp_comparison": data_source.get_ecmp_comparison(),
+                "timestamp": time.time()
+            })
     except Exception as e:
         logger.error("stats_fetch_failed", error=str(e))
         return jsonify({"error": str(e)}), 500
@@ -385,7 +410,8 @@ def get_stats():
 def get_energy():
     """Get energy statistics."""
     try:
-        return jsonify(mock_data.get_energy_stats())
+        data_source = get_data_source()
+        return jsonify(data_source.get_energy_stats())
     except Exception as e:
         logger.error("energy_fetch_failed", error=str(e))
         return jsonify({"error": str(e)}), 500
@@ -395,8 +421,14 @@ def get_energy():
 def get_energy_history():
     """Get energy history for charts."""
     try:
+        data_source = get_data_source()
+        if hasattr(data_source, 'energy_history'):
+            history = data_source.energy_history
+        else:
+            # ControllerClient doesn't have energy_history, build from current stats
+            history = []
         return jsonify({
-            "history": mock_data.energy_history,
+            "history": history,
             "timestamp": time.time()
         })
     except Exception as e:
@@ -408,7 +440,8 @@ def get_energy_history():
 def get_predictions():
     """Get EWMA predictions."""
     try:
-        return jsonify(mock_data.get_predictions())
+        data_source = get_data_source()
+        return jsonify(data_source.get_predictions())
     except Exception as e:
         logger.error("predictions_fetch_failed", error=str(e))
         return jsonify({"error": str(e)}), 500
@@ -418,7 +451,8 @@ def get_predictions():
 def get_qos():
     """Get QoS metrics."""
     try:
-        return jsonify(mock_data.get_qos_metrics())
+        data_source = get_data_source()
+        return jsonify(data_source.get_qos_metrics())
     except Exception as e:
         logger.error("qos_fetch_failed", error=str(e))
         return jsonify({"error": str(e)}), 500
@@ -428,9 +462,10 @@ def get_qos():
 def get_events():
     """Get recent events."""
     try:
+        data_source = get_data_source()
         limit = request.args.get('limit', 50, type=int)
         return jsonify({
-            "events": mock_data.get_events(limit),
+            "events": data_source.get_events(limit),
             "timestamp": time.time()
         })
     except Exception as e:
@@ -442,7 +477,8 @@ def get_events():
 def get_ecmp_comparison():
     """Get ECMP baseline comparison."""
     try:
-        return jsonify(mock_data.get_ecmp_comparison())
+        data_source = get_data_source()
+        return jsonify(data_source.get_ecmp_comparison())
     except Exception as e:
         logger.error("ecmp_comparison_failed", error=str(e))
         return jsonify({"error": str(e)}), 500
@@ -452,7 +488,13 @@ def get_ecmp_comparison():
 def get_switches():
     """Get switch information."""
     try:
-        switches = [n for n in mock_data.nodes if n['type'] != 'host']
+        data_source = get_data_source()
+        if hasattr(data_source, 'nodes'):
+            switches = [n for n in data_source.nodes if n['type'] != 'host']
+        else:
+            # For ControllerClient, get topology and extract switches
+            topo = data_source.get_topology()
+            switches = [n for n in topo.get('nodes', []) if n.get('type') != 'host']
         return jsonify({
             "switches": switches,
             "count": len(switches),
@@ -467,7 +509,13 @@ def get_switches():
 def get_hosts():
     """Get host information."""
     try:
-        hosts = [n for n in mock_data.nodes if n['type'] == 'host']
+        data_source = get_data_source()
+        if hasattr(data_source, 'nodes'):
+            hosts = [n for n in data_source.nodes if n['type'] == 'host']
+        else:
+            # For ControllerClient, get topology and extract hosts
+            topo = data_source.get_topology()
+            hosts = [n for n in topo.get('nodes', []) if n.get('type') == 'host']
         return jsonify({
             "hosts": hosts,
             "count": len(hosts),
@@ -505,15 +553,17 @@ def broadcast_updates():
     while True:
         socketio.sleep(1)
         try:
+            data_source = get_data_source()
+
             # Emit energy stats
-            socketio.emit('energy_update', mock_data.get_energy_stats())
+            socketio.emit('energy_update', data_source.get_energy_stats())
 
             # Emit topology updates less frequently
             if int(time.time()) % 5 == 0:
-                socketio.emit('topology_update', mock_data.get_topology())
+                socketio.emit('topology_update', data_source.get_topology())
 
             # Emit events
-            recent_events = mock_data.get_events(5)
+            recent_events = data_source.get_events(5)
             if recent_events:
                 socketio.emit('event_update', {'events': recent_events})
 
@@ -523,6 +573,8 @@ def broadcast_updates():
 
 def main():
     """Main entry point."""
+    global controller_client
+
     parser = argparse.ArgumentParser(description="EcoRoute Dashboard API")
     parser.add_argument(
         "--port",
@@ -547,17 +599,50 @@ def main():
         default="http://127.0.0.1:8080",
         help="Ryu controller REST URL"
     )
+    parser.add_argument(
+        "--use-mock",
+        action="store_true",
+        help="Use mock data instead of real controller client"
+    )
+    parser.add_argument(
+        "--model-path",
+        type=str,
+        default="training/models/ewma_model.json",
+        help="Path to trained EWMA model"
+    )
 
     args = parser.parse_args()
 
     global CONTROLLER_URL
     CONTROLLER_URL = args.controller_url
 
+    # Initialize controller client unless using mock data
+    if not args.use_mock:
+        # Parse controller URL
+        from urllib.parse import urlparse
+        parsed = urlparse(args.controller_url)
+
+        config = ControllerConfig(
+            host=parsed.hostname or "127.0.0.1",
+            port=parsed.port or 8080,
+            use_mock=False,
+            trained_model_path=args.model_path
+        )
+        controller_client = ControllerClient(config)
+        logger.info(
+            "using_controller_client",
+            model_path=args.model_path,
+            controller_url=args.controller_url
+        )
+    else:
+        logger.info("using_mock_data")
+
     logger.info(
         "starting_dashboard_api",
         host=args.host,
         port=args.port,
-        controller_url=CONTROLLER_URL
+        controller_url=CONTROLLER_URL,
+        mode="mock" if args.use_mock else "production"
     )
 
     # Start background update task

@@ -1,0 +1,23 @@
+{
+  "optimal_alpha": 0.20000000000000004,
+  "optimal_min_alpha": 0.2,
+  "optimal_max_alpha": 0.6,
+  "burst_threshold": 0.3,
+  "prediction_steps": 3,
+  "trained_at": "2026-01-04T15:48:40.661349",
+  "training_duration_sec": 739.1471221446991,
+  "dataset_info": {
+    "path": "data/training/link_utilization.csv",
+    "total_samples": 14400,
+    "num_links": 20,
+    "cv_folds": 5
+  },
+  "metrics": {
+    "mape": 83.64491490373231,
+    "rmse": 10.284080995235382,
+    "mae": 8.268322397590271,
+    "prediction_accuracy": 9.176056338028168,
+    "burst_response_time": 1.0450769847558399,
+    "samples_evaluated": 14400
+  }
+}

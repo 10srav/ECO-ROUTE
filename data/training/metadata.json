@@ -1,0 +1,12 @@
+{
+  "generated_at": "2026-01-04T15:36:12.887477",
+  "duration_hours": 1.0,
+  "seed": 42,
+  "num_links": 20,
+  "link_samples": 14400,
+  "sample_interval_sec": 5,
+  "characteristics": {
+    "diurnal_pattern": "24h cycle",
+    "utilization_range": "5-95%"
+  }
+}
