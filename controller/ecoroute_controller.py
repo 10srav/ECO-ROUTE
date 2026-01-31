@@ -665,10 +665,19 @@ class EcoRouteController(app_manager.RyuApp):
 
         flow_stats = []
         for stat in ev.msg.body:
+            # Convert match to dict using to_jsondict
+            try:
+                if hasattr(stat, 'match') and hasattr(stat.match, 'to_jsondict'):
+                    match_dict = stat.match.to_jsondict()
+                else:
+                    match_dict = {}
+            except Exception:
+                match_dict = {}
+
             flow_stats.append(FlowStats(
                 dpid=dpid,
                 table_id=stat.table_id,
-                match=dict(stat.match),
+                match=match_dict,
                 priority=stat.priority,
                 byte_count=stat.byte_count,
                 packet_count=stat.packet_count,
