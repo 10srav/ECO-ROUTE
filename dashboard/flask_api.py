@@ -586,18 +586,21 @@ def handle_subscribe(data):
 
 
 def broadcast_updates():
-    """Background task to broadcast updates."""
+    """Background task to broadcast updates via WebSocket.
+
+    Uses a 5s interval to avoid flooding the Ryu controller with requests.
+    The ControllerClient cache ensures most calls are served locally.
+    """
     while True:
-        socketio.sleep(1)
+        socketio.sleep(5)
         try:
             data_source = get_data_source()
 
-            # Emit energy stats
+            # Emit energy stats (served from cache most of the time)
             socketio.emit('energy_update', data_source.get_energy_stats())
 
-            # Emit topology updates less frequently
-            if int(time.time()) % 5 == 0:
-                socketio.emit('topology_update', data_source.get_topology())
+            # Emit topology updates
+            socketio.emit('topology_update', data_source.get_topology())
 
             # Emit events
             recent_events = data_source.get_events(5)

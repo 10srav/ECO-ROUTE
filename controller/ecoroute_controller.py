@@ -37,7 +37,7 @@ from os_ken.controller.handler import (
     set_ev_cls,
 )
 from os_ken.lib import hub
-from os_ken.lib.packet import arp, ethernet, icmp, ipv4, packet, tcp, udp
+from os_ken.lib.packet import arp, ethernet, icmp, ipv4, lldp, packet, tcp, udp
 from os_ken.ofproto import ofproto_v1_3
 from os_ken.topology import event as topo_event
 from os_ken.topology.api import get_all_link, get_all_switch
@@ -177,9 +177,9 @@ class EcoRouteController(app_manager.OSKenApp):
             export_interval=metrics_config.get("export_interval", 10.0)
         )
 
-        # Set callbacks
-        self.sleep_manager.set_flow_mod_callback(self._async_install_path)
-        self.sleep_manager.set_port_mod_callback(self._async_port_mod)
+        # Set callbacks (synchronous - compatible with eventlet green threads)
+        self.sleep_manager.set_flow_mod_callback(self._sync_install_path)
+        self.sleep_manager.set_port_mod_callback(self._sync_port_mod)
         self.stats_collector.set_energy_callback(self.energy_model.get_stats)
 
         # Datapath tracking
@@ -206,9 +206,18 @@ class EcoRouteController(app_manager.OSKenApp):
         # Running flag
         self._running = True
 
+        # Track discovered links to avoid duplicate add_link calls
+        self._discovered_links: Set[Tuple[int, int, int, int]] = set()
+
+        # Flood dedup cache: (src_mac, dst_identifier) -> timestamp
+        # Prevents broadcast storms when flooding unknown destinations
+        self._flood_cache: Dict[Tuple[str, str], float] = {}
+        self._FLOOD_TIMEOUT = 2.0  # seconds
+
         # Start background threads
         self.stats_thread = hub.spawn(self._stats_polling_loop)
         self.optimization_thread = hub.spawn(self._optimization_loop)
+        self.lldp_thread = hub.spawn(self._lldp_send_loop)
 
         logger.info(
             "ecoroute_controller_initialized",
@@ -255,7 +264,29 @@ class EcoRouteController(app_manager.OSKenApp):
             if dpid in self.datapaths:
                 del self.datapaths[dpid]
                 self.energy_model.unregister_switch(dpid)
-                logger.info("switch_disconnected", dpid=dpid)
+
+                # Clean up router state: remove links involving this switch
+                links_to_remove = [
+                    (src, dst) for (src, dst) in self.router._link_info
+                    if src == dpid or dst == dpid
+                ]
+                for src, dst in links_to_remove:
+                    self.router.remove_link(src, dst)
+
+                # Clean up MAC table for this switch
+                self.mac_to_port.pop(dpid, None)
+
+                # Clean up hosts connected to this switch
+                hosts_to_remove = [
+                    ip for ip, (sw, port, mac) in self.hosts.items()
+                    if sw == dpid
+                ]
+                for ip in hosts_to_remove:
+                    del self.hosts[ip]
+                    self.arp_table.pop(ip, None)
+                    self.router.remove_host(ip)
+
+                logger.info("switch_disconnected", dpid=dpid, removed_links=len(links_to_remove), removed_hosts=len(hosts_to_remove))
 
     @set_ev_cls(ofp_event.EventOFPPortDescStatsReply, MAIN_DISPATCHER)
     def port_desc_stats_reply_handler(self, ev):
@@ -295,7 +326,8 @@ class EcoRouteController(app_manager.OSKenApp):
         pkt = packet.Packet(msg.data)
         eth = pkt.get_protocol(ethernet.ethernet)
 
-        if eth.ethertype == 0x88cc:  # LLDP
+        if eth.ethertype == 0x88cc:  # LLDP — parse for link discovery
+            self._handle_lldp(dpid, in_port, pkt)
             return
 
         src_mac = eth.src
@@ -316,22 +348,9 @@ class EcoRouteController(app_manager.OSKenApp):
             self._handle_ipv4(datapath, in_port, eth, ip_pkt, pkt, msg.data)
             return
 
-        # Default: flood
-        out_port = ofproto.OFPP_FLOOD
-        actions = [parser.OFPActionOutput(out_port)]
-
-        data = None
-        if msg.buffer_id == ofproto.OFP_NO_BUFFER:
-            data = msg.data
-
-        out = parser.OFPPacketOut(
-            datapath=datapath,
-            buffer_id=msg.buffer_id,
-            in_port=in_port,
-            actions=actions,
-            data=data
-        )
-        datapath.send_msg(out)
+        # Non-ARP/non-IPv4: drop to prevent broadcast storms
+        # (LLDP is already filtered above)
+        return
 
     def _handle_arp(self, datapath, in_port, eth, arp_pkt, data):
         """Handle ARP packets for host discovery."""
@@ -339,33 +358,57 @@ class EcoRouteController(app_manager.OSKenApp):
         src_ip = arp_pkt.src_ip
         src_mac = arp_pkt.src_mac
 
-        # Register host
-        self.hosts[src_ip] = (dpid, in_port, src_mac)
-        self.arp_table[src_ip] = src_mac
-        self.router.add_host(src_ip, dpid, in_port)
+        # Don't process ARP that arrived from a switch-facing port
+        # (it was flooded from another switch — processing it would corrupt host table)
+        switch_ports = self._get_switch_facing_ports(dpid)
+        if in_port in switch_ports:
+            return
 
-        logger.debug(
-            "host_discovered",
-            ip=src_ip,
-            mac=src_mac,
-            dpid=dpid,
-            port=in_port
-        )
+        # Register host — only if new or updating on the SAME switch
+        # (prevents corruption from flooded packets before link discovery)
+        if src_ip not in self.hosts or self.hosts[src_ip][0] == dpid:
+            self.hosts[src_ip] = (dpid, in_port, src_mac)
+            self.arp_table[src_ip] = src_mac
+            self.router.add_host(src_ip, dpid, in_port)
+
+            logger.debug(
+                "host_discovered",
+                ip=src_ip,
+                mac=src_mac,
+                dpid=dpid,
+                port=in_port
+            )
 
         if arp_pkt.opcode == arp.ARP_REQUEST:
             dst_ip = arp_pkt.dst_ip
 
             # Check if we know the destination
             if dst_ip in self.arp_table:
-                # Reply on behalf of destination
+                # Reply on behalf of destination (proxy ARP)
                 self._send_arp_reply(
                     datapath, in_port, eth,
                     dst_ip, self.arp_table[dst_ip],
                     src_ip, src_mac
                 )
             else:
-                # Flood ARP request
-                self._flood_packet(datapath, in_port, data)
+                # Deduplicate ARP floods to prevent broadcast storms
+                flood_key = (src_mac, dst_ip)
+                now = time.time()
+                if flood_key in self._flood_cache and \
+                        now - self._flood_cache[flood_key] < self._FLOOD_TIMEOUT:
+                    return  # Already flooded this ARP recently
+                self._flood_cache[flood_key] = now
+                self._flood_to_hosts(datapath, in_port, data)
+
+        elif arp_pkt.opcode == arp.ARP_REPLY:
+            # Forward ARP reply to the destination host
+            dst_ip = arp_pkt.dst_ip
+            if dst_ip in self.hosts:
+                dst_dpid, dst_port, _ = self.hosts[dst_ip]
+                if dst_dpid in self.datapaths:
+                    self._send_packet(
+                        self.datapaths[dst_dpid], dst_port, data
+                    )
 
     def _send_arp_reply(
         self,
@@ -415,15 +458,40 @@ class EcoRouteController(app_manager.OSKenApp):
         src_ip = ip_pkt.src
         dst_ip = ip_pkt.dst
 
-        # Register source host if not known
-        if src_ip not in self.hosts:
+        # Check if packet arrived from a switch-facing port (was flooded/forwarded)
+        switch_ports = self._get_switch_facing_ports(dpid)
+        from_switch = in_port in switch_ports
+
+        # Register source host if not known (only from host-facing ports)
+        if not from_switch and src_ip not in self.hosts:
             self.hosts[src_ip] = (dpid, in_port, eth.src)
             self.router.add_host(src_ip, dpid, in_port)
 
+        # If packet came from a switch port (flooded), only deliver locally
+        if from_switch:
+            if dst_ip in self.hosts:
+                dst_dpid, dst_port, dst_mac = self.hosts[dst_ip]
+                if dpid == dst_dpid:
+                    self._install_direct_flow(datapath, eth, ip_pkt, dst_port)
+                    self._send_packet(datapath, dst_port, data)
+            return
+
         # Check if destination is known
         if dst_ip not in self.hosts:
-            # Destination unknown - flood
-            self._flood_packet(datapath, in_port, data)
+            # Destination unknown — flood to discover host (instead of dropping)
+            flood_key = (eth.src, eth.dst)
+            now = time.time()
+            if flood_key in self._flood_cache and \
+                    now - self._flood_cache[flood_key] < self._FLOOD_TIMEOUT:
+                return  # Already flooded recently
+            self._flood_cache[flood_key] = now
+            # Periodic cleanup of stale entries
+            if len(self._flood_cache) > 200:
+                self._flood_cache = {
+                    k: v for k, v in self._flood_cache.items()
+                    if now - v < self._FLOOD_TIMEOUT
+                }
+            self._flood_to_hosts(datapath, in_port, data)
             return
 
         dst_dpid, dst_port, dst_mac = self.hosts[dst_ip]
@@ -437,13 +505,28 @@ class EcoRouteController(app_manager.OSKenApp):
         # Find energy-aware path
         path_score = self.router.find_best_path(dpid, dst_dpid)
 
+        if path_score and path_score.sleeping_links_used > 0:
+            # On-demand wake: traffic needs links that are sleeping
+            for lsrc, lsrc_port, ldst, ldst_port in path_score.links:
+                if (self.energy_model.is_port_sleeping(lsrc, lsrc_port) or
+                        self.energy_model.is_port_sleeping(ldst, ldst_port)):
+                    self._wake_link(lsrc, lsrc_port, ldst, ldst_port)
+                    self.predictor.reset(lsrc, lsrc_port)
+                    self.predictor.reset(ldst, ldst_port)
+            logger.info(
+                "on_demand_wake",
+                src_dpid=dpid,
+                dst_dpid=dst_dpid,
+                sleeping_links_woken=path_score.sleeping_links_used
+            )
+
         if not path_score:
             logger.warning(
                 "no_path_found",
                 src_dpid=dpid,
                 dst_dpid=dst_dpid
             )
-            self._flood_packet(datapath, in_port, data)
+            # Drop - no valid path exists; host will retry after topology converges
             return
 
         # Generate flow ID
@@ -579,18 +662,155 @@ class EcoRouteController(app_manager.OSKenApp):
         )
         datapath.send_msg(mod)
 
-    def _flood_packet(self, datapath, in_port, data):
-        """Flood a packet to all ports except input."""
+    def _get_switch_facing_ports(self, dpid):
+        """Get set of ports on this switch that connect to other switches."""
+        switch_ports = set()
+        for (s, d), (sp, dp, _) in self.router._link_info.items():
+            if s == dpid:
+                switch_ports.add(sp)
+            if d == dpid:
+                switch_ports.add(dp)
+        return switch_ports
+
+    def _get_host_facing_ports(self, dpid):
+        """Get ports that face hosts (not connected to other switches)."""
+        switch = self.energy_model._switches.get(dpid)
+        if not switch:
+            return set()
+        all_ports = set(switch.ports.keys())
+        switch_ports = self._get_switch_facing_ports(dpid)
+        return all_ports - switch_ports
+
+    def _flood_to_hosts(self, source_datapath, in_port, data):
+        """Flood packet to host-facing ports only, preventing broadcast storms.
+
+        Instead of OFPP_FLOOD (which causes loops in multi-switch topologies),
+        send individual PacketOut messages to each host-facing port on every
+        edge switch. Core/aggregation switches have no host ports and are skipped.
+        """
+        source_dpid = source_datapath.id
+        sent = False
+
+        for dpid, dp in self.datapaths.items():
+            host_ports = self._get_host_facing_ports(dpid)
+            if not host_ports:
+                continue
+
+            parser = dp.ofproto_parser
+            for port in host_ports:
+                if dpid == source_dpid and port == in_port:
+                    continue
+                actions = [parser.OFPActionOutput(port)]
+                out = parser.OFPPacketOut(
+                    datapath=dp,
+                    buffer_id=dp.ofproto.OFP_NO_BUFFER,
+                    in_port=dp.ofproto.OFPP_CONTROLLER,
+                    actions=actions,
+                    data=data
+                )
+                dp.send_msg(out)
+                sent = True
+
+        if not sent:
+            # Fallback: topology not yet discovered, flood on entry switch only
+            logger.debug("flood_fallback_no_topology", dpid=source_dpid)
+            ofproto = source_datapath.ofproto
+            parser = source_datapath.ofproto_parser
+            actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
+            out = parser.OFPPacketOut(
+                datapath=source_datapath,
+                buffer_id=ofproto.OFP_NO_BUFFER,
+                in_port=in_port,
+                actions=actions,
+                data=data
+            )
+            source_datapath.send_msg(out)
+
+    def _handle_lldp(self, dst_dpid, dst_port, pkt):
+        """Parse LLDP packet to discover a link between two switches."""
+        lldp_pkt = pkt.get_protocol(lldp.lldp)
+        if not lldp_pkt or len(lldp_pkt.tlvs) < 2:
+            return
+
+        # TLV 0: Chassis ID = dpid as binary, TLV 1: Port ID = port_no
+        try:
+            chassis_tlv = lldp_pkt.tlvs[0]
+            port_tlv = lldp_pkt.tlvs[1]
+
+            # Chassis ID: subtype 7 (locally assigned) — dpid encoded by us
+            src_dpid = int.from_bytes(chassis_tlv.chassis_id, 'big')
+            # Port ID: subtype 7 — port_no encoded by us
+            src_port = int.from_bytes(port_tlv.port_id, 'big')
+        except Exception:
+            return
+
+        if src_dpid == dst_dpid:
+            return  # Ignore self-loops
+
+        link_key = (src_dpid, src_port, dst_dpid, dst_port)
+        if link_key in self._discovered_links:
+            return  # Already known
+
+        self._discovered_links.add(link_key)
+
+        # Register link in router and energy model
+        self.router.add_link(src_dpid, src_port, dst_dpid, dst_port, 1000.0)
+
+        logger.info(
+            "link_discovered",
+            src_dpid=src_dpid, src_port=src_port,
+            dst_dpid=dst_dpid, dst_port=dst_port
+        )
+
+    def _lldp_send_loop(self):
+        """Periodically send LLDP packets out every port for link discovery."""
+        # Wait briefly for switches to connect and report ports
+        hub.sleep(2)
+
+        while self._running:
+            for dpid, datapath in list(self.datapaths.items()):
+                switch = self.energy_model._switches.get(dpid)
+                if not switch:
+                    continue
+                for port_no in switch.ports:
+                    self._send_lldp(datapath, port_no)
+            hub.sleep(3)  # Send LLDP every 3 seconds
+
+    def _send_lldp(self, datapath, port_no):
+        """Send an LLDP packet out of a specific port."""
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
+        dpid = datapath.id
 
-        actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
+        # Build LLDP packet with dpid and port_no encoded
+        pkt = packet.Packet()
+        pkt.add_protocol(ethernet.ethernet(
+            ethertype=0x88cc,
+            src='00:00:00:00:00:00',
+            dst=lldp.LLDP_MAC_NEAREST_BRIDGE
+        ))
+
+        chassis_id = lldp.ChassisID(
+            subtype=lldp.ChassisID.SUB_LOCALLY_ASSIGNED,
+            chassis_id=dpid.to_bytes(8, 'big')
+        )
+        port_id = lldp.PortID(
+            subtype=lldp.PortID.SUB_LOCALLY_ASSIGNED,
+            port_id=port_no.to_bytes(4, 'big')
+        )
+        ttl = lldp.TTL(ttl=120)
+        end = lldp.End()
+
+        pkt.add_protocol(lldp.lldp(tlvs=[chassis_id, port_id, ttl, end]))
+        pkt.serialize()
+
+        actions = [parser.OFPActionOutput(port_no)]
         out = parser.OFPPacketOut(
             datapath=datapath,
             buffer_id=ofproto.OFP_NO_BUFFER,
-            in_port=in_port,
+            in_port=ofproto.OFPP_CONTROLLER,
             actions=actions,
-            data=data
+            data=pkt.data
         )
         datapath.send_msg(out)
 
@@ -757,6 +977,16 @@ class EcoRouteController(app_manager.OSKenApp):
         # Wait for topology discovery
         hub.sleep(30)
 
+        # Set ECMP baseline from current energy state (all ports active)
+        try:
+            energy_stats = self.energy_model.get_stats()
+            baseline_power = energy_stats.get("baseline_power_watts", 0)
+            if baseline_power > 0:
+                self.stats_collector.set_ecmp_baseline(baseline_power)
+                logger.info("ecmp_baseline_set", baseline_power=baseline_power)
+        except Exception as e:
+            logger.warning("ecmp_baseline_set_failed", error=str(e))
+
         while self._running:
             try:
                 # Run optimization cycle using hub for async
@@ -785,6 +1015,10 @@ class EcoRouteController(app_manager.OSKenApp):
         for src_dpid, src_port, dst_dpid, dst_port in wake_candidates:
             try:
                 self._wake_link(src_dpid, src_port, dst_dpid, dst_port)
+                # Reset predictor for woken ports so stale EWMA data doesn't
+                # immediately trigger re-sleep. Fresh stats will rebuild predictions.
+                self.predictor.reset(src_dpid, src_port)
+                self.predictor.reset(dst_dpid, dst_port)
             except Exception as e:
                 logger.error(
                     "wake_failed",
@@ -886,13 +1120,15 @@ class EcoRouteController(app_manager.OSKenApp):
             dst_port=dst_port
         )
 
-    async def _async_install_path(self, flow_id, src_ip, dst_ip, path, links):
-        """Async callback for flow installation."""
-        pass  # Handled synchronously in _sleep_link
+    def _sync_install_path(self, flow_id, src_ip, dst_ip, path, links):
+        """Synchronous callback for flow installation (used by SleepManager)."""
+        # Flow installation is handled synchronously in _sleep_link
+        pass
 
-    async def _async_port_mod(self, dpid, port, sleep=True):
-        """Async callback for port modification."""
-        pass  # Handled synchronously
+    def _sync_port_mod(self, dpid, port, sleep=True):
+        """Synchronous callback for port modification (used by SleepManager)."""
+        # Port modification is handled synchronously in _sleep_link/_wake_link
+        pass
 
     def get_network_stats(self) -> Dict:
         """Get comprehensive network statistics for dashboard."""

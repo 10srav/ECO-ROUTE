@@ -452,13 +452,21 @@ class EnergyModel:
         new_state: PortState
     ):
         """Log a sleep/wake event."""
+        if event_type == "port_sleep":
+            details = f"Link {dpid}:{port_no} put to sleep ({old_state.value} -> {new_state.value})"
+        elif event_type == "port_wake":
+            details = f"Link {dpid}:{port_no} woken up ({old_state.value} -> {new_state.value})"
+        else:
+            details = f"Link {dpid}:{port_no} transition {old_state.value} -> {new_state.value}"
+
         event = {
             "timestamp": time.time(),
             "type": event_type,
             "dpid": dpid,
             "port_no": port_no,
             "old_state": old_state.value,
-            "new_state": new_state.value
+            "new_state": new_state.value,
+            "details": details
         }
 
         if len(self._events) >= self._max_events:

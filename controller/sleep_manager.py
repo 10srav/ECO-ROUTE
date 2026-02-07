@@ -10,7 +10,6 @@ Implements Make-Before-Break (MBB) link sleep/wake logic:
 
 from __future__ import annotations
 
-import asyncio
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -89,7 +88,9 @@ class SleepManager:
         wake_latency_ms: float = 100.0,
         max_packet_loss: float = 0.1,
         validation_timeout: float = 5.0,
-        max_retries: int = 3
+        max_retries: int = 3,
+        max_sleep_duration: float = 120.0,
+        max_sleeping_ratio: float = 0.5
     ):
         """
         Initialize Sleep Manager.
@@ -105,6 +106,8 @@ class SleepManager:
             max_packet_loss: Maximum acceptable packet loss during transition (%)
             validation_timeout: Time to validate new paths (s)
             max_retries: Maximum retry attempts for failed transitions
+            max_sleep_duration: Max time a link can sleep before forced wake (s)
+            max_sleeping_ratio: Max fraction of links allowed to sleep (0-1)
         """
         self.energy_model = energy_model
         self.router = router
@@ -116,6 +119,8 @@ class SleepManager:
         self.max_packet_loss = max_packet_loss
         self.validation_timeout = validation_timeout
         self.max_retries = max_retries
+        self.max_sleep_duration = max_sleep_duration
+        self.max_sleeping_ratio = max_sleeping_ratio
 
         # Active transitions
         self._transitions: Dict[Tuple[int, int], LinkTransition] = {}
@@ -159,6 +164,25 @@ class SleepManager:
         """Set callback to get current packet loss."""
         self._get_packet_loss_callback = callback
 
+    def _would_disconnect_switch(
+        self,
+        src_dpid: int,
+        src_port: int,
+        dst_dpid: int,
+        dst_port: int
+    ) -> bool:
+        """Check if sleeping this link would leave either endpoint switch
+        with no remaining active inter-switch links (disconnecting it)."""
+        for check_dpid, check_port in [(src_dpid, src_port), (dst_dpid, dst_port)]:
+            other_active = 0
+            for (s, d), (sp, dp, _) in self.router._link_info.items():
+                if s == check_dpid and sp != check_port:
+                    if not self.energy_model.is_port_sleeping(s, sp):
+                        other_active += 1
+            if other_active == 0:
+                return True
+        return False
+
     def get_sleep_candidates(self) -> List[Tuple[int, int, int, int]]:
         """
         Get links that are candidates for sleeping.
@@ -166,6 +190,23 @@ class SleepManager:
         Returns:
             List of (src_dpid, src_port, dst_dpid, dst_port) tuples
         """
+        # Enforce max sleeping ratio: don't sleep more links if already at limit
+        total_links = len(self.router._link_info)
+        if total_links > 0:
+            sleeping_count = sum(
+                1 for (src_dpid, _), (src_port, _, _) in self.router._link_info.items()
+                if self.energy_model.is_port_sleeping(src_dpid, src_port)
+            )
+            if sleeping_count / total_links >= self.max_sleeping_ratio:
+                logger.debug(
+                    "sleep_ratio_limit_reached",
+                    sleeping=sleeping_count,
+                    total=total_links,
+                    ratio=round(sleeping_count / total_links, 2),
+                    max_ratio=self.max_sleeping_ratio
+                )
+                return []
+
         candidates = []
 
         for (src_dpid, dst_dpid), (src_port, dst_port, _) in self.router._link_info.items():
@@ -175,6 +216,10 @@ class SleepManager:
 
             # Skip if already sleeping
             if self.energy_model.is_port_sleeping(src_dpid, src_port):
+                continue
+
+            # Skip if sleeping this link would disconnect a switch
+            if self._would_disconnect_switch(src_dpid, src_port, dst_dpid, dst_port):
                 continue
 
             # Check EWMA prediction
@@ -202,10 +247,16 @@ class SleepManager:
         """
         Get sleeping links that should be woken up.
 
+        Uses multiple wake triggers:
+        1. EWMA prediction-based (load or staleness)
+        2. Max sleep duration exceeded
+        3. Too many links sleeping (over max_sleeping_ratio)
+
         Returns:
             List of (src_dpid, src_port, dst_dpid, dst_port) tuples
         """
         candidates = []
+        current_time = time.time()
 
         for (src_dpid, dst_dpid), (src_port, dst_port, _) in self.router._link_info.items():
             # Only consider sleeping links
@@ -219,16 +270,36 @@ class SleepManager:
                 if trans.state == TransitionState.WAKING:
                     continue
 
-            # Check EWMA prediction for wake
+            should_wake = False
+
+            # Check 1: EWMA prediction-based wake (includes staleness check)
             if self.predictor.should_wake(
                 src_dpid, src_port,
                 self.wake_threshold
             ):
+                should_wake = True
+
+            # Check 2: Max sleep duration exceeded — force wake
+            if not should_wake:
+                switch = self.energy_model._switches.get(src_dpid)
+                if switch and src_port in switch.ports:
+                    sleep_duration = current_time - switch.ports[src_port].last_state_change
+                    if sleep_duration > self.max_sleep_duration:
+                        should_wake = True
+                        logger.info(
+                            "wake_max_duration_exceeded",
+                            src_dpid=src_dpid,
+                            src_port=src_port,
+                            sleep_duration=round(sleep_duration, 1),
+                            max_duration=self.max_sleep_duration
+                        )
+
+            if should_wake:
                 candidates.append((src_dpid, src_port, dst_dpid, dst_port))
 
         return candidates
 
-    async def initiate_sleep(
+    def initiate_sleep(
         self,
         src_dpid: int,
         src_port: int,
@@ -305,21 +376,21 @@ class SleepManager:
                 for flow_id, new_path in reroute_paths.items():
                     if self._flow_mod_callback:
                         flow = self.router._flows[flow_id]
-                        await self._install_new_path(flow, new_path)
+                        self._install_new_path(flow, new_path)
                         transition.flows_rerouted.append(flow_id)
                         self._stats["flows_rerouted"] += 1
 
                 # Step 4: Validate new paths
                 transition.state = TransitionState.VALIDATING
-                validation_success = await self._validate_paths(transition)
+                validation_success = self._validate_paths(transition)
 
                 if not validation_success:
                     raise Exception("Path validation failed")
 
             # Step 5: Put link to sleep
             transition.state = TransitionState.SLEEPING
-            await self._sleep_port(src_dpid, src_port)
-            await self._sleep_port(dst_dpid, dst_port)
+            self._sleep_port(src_dpid, src_port)
+            self._sleep_port(dst_dpid, dst_port)
 
             # Update energy model
             self.energy_model.set_port_sleeping(src_dpid, src_port)
@@ -365,7 +436,7 @@ class SleepManager:
             self._stats["sleep_failures"] += 1
 
             # Attempt rollback
-            await self._rollback_sleep(transition)
+            self._rollback_sleep(transition)
 
             return False
 
@@ -376,7 +447,7 @@ class SleepManager:
                 if trans.state in [TransitionState.SLEEPING, TransitionState.FAILED]:
                     del self._transitions[link_key]
 
-    async def initiate_wake(
+    def initiate_wake(
         self,
         src_dpid: int,
         src_port: int,
@@ -420,14 +491,14 @@ class SleepManager:
 
         try:
             # Wake up ports
-            await self._wake_port(src_dpid, src_port)
-            await self._wake_port(dst_dpid, dst_port)
+            self._wake_port(src_dpid, src_port)
+            self._wake_port(dst_dpid, dst_port)
 
             # Wait for wake latency
-            await asyncio.sleep(self.wake_latency_ms / 1000.0)
+            time.sleep(self.wake_latency_ms / 1000.0)
 
             # Validate connectivity
-            await self._validate_link_connectivity(
+            self._validate_link_connectivity(
                 src_dpid, src_port, dst_dpid, dst_port
             )
 
@@ -466,10 +537,10 @@ class SleepManager:
             if link_key in self._transitions:
                 del self._transitions[link_key]
 
-    async def _install_new_path(self, flow: Flow, new_path: PathScore):
+    def _install_new_path(self, flow: Flow, new_path: PathScore):
         """Install flow rules for new path."""
         if self._flow_mod_callback:
-            await self._flow_mod_callback(
+            self._flow_mod_callback(
                 flow.flow_id,
                 flow.src_ip,
                 flow.dst_ip,
@@ -477,18 +548,18 @@ class SleepManager:
                 new_path.links
             )
 
-    async def _validate_paths(self, transition: LinkTransition) -> bool:
+    def _validate_paths(self, transition: LinkTransition) -> bool:
         """
         Validate that rerouted flows are working.
 
         Checks packet loss is within acceptable limits.
         """
         # Wait for validation period
-        await asyncio.sleep(self.validation_timeout)
+        time.sleep(self.validation_timeout)
 
         if self._get_packet_loss_callback:
             for flow_id in transition.flows_rerouted:
-                packet_loss = await self._get_packet_loss_callback(flow_id)
+                packet_loss = self._get_packet_loss_callback(flow_id)
                 if packet_loss > self.max_packet_loss:
                     logger.warning(
                         "path_validation_high_loss",
@@ -500,17 +571,17 @@ class SleepManager:
 
         return True
 
-    async def _sleep_port(self, dpid: int, port: int):
+    def _sleep_port(self, dpid: int, port: int):
         """Send port sleep command."""
         if self._port_mod_callback:
-            await self._port_mod_callback(dpid, port, sleep=True)
+            self._port_mod_callback(dpid, port, sleep=True)
 
-    async def _wake_port(self, dpid: int, port: int):
+    def _wake_port(self, dpid: int, port: int):
         """Send port wake command."""
         if self._port_mod_callback:
-            await self._port_mod_callback(dpid, port, sleep=False)
+            self._port_mod_callback(dpid, port, sleep=False)
 
-    async def _validate_link_connectivity(
+    def _validate_link_connectivity(
         self,
         src_dpid: int,
         src_port: int,
@@ -521,7 +592,7 @@ class SleepManager:
         # In production, would check link state via OpenFlow
         pass
 
-    async def _rollback_sleep(self, transition: LinkTransition):
+    def _rollback_sleep(self, transition: LinkTransition):
         """Rollback a failed sleep transition."""
         self._stats["rollbacks"] += 1
 
@@ -569,7 +640,7 @@ class SleepManager:
             reason=reason
         )
 
-    async def process_wake_queue(self) -> int:
+    def process_wake_queue(self) -> int:
         """
         Process pending wake requests.
 
@@ -587,7 +658,7 @@ class SleepManager:
             ):
                 continue
 
-            success = await self.initiate_wake(
+            success = self.initiate_wake(
                 request.src_dpid,
                 request.src_port,
                 request.dst_dpid,
@@ -600,7 +671,7 @@ class SleepManager:
 
         return woken
 
-    async def run_optimization_cycle(self) -> Dict:
+    def run_optimization_cycle(self) -> Dict:
         """
         Run one cycle of sleep/wake optimization.
 
@@ -615,12 +686,12 @@ class SleepManager:
         }
 
         # Process wake requests first (priority)
-        results["links_woken"] = await self.process_wake_queue()
+        results["links_woken"] = self.process_wake_queue()
 
         # Check for links to wake based on predictions
         wake_candidates = self.get_wake_candidates()
         for src_dpid, src_port, dst_dpid, dst_port in wake_candidates:
-            success = await self.initiate_wake(
+            success = self.initiate_wake(
                 src_dpid, src_port, dst_dpid, dst_port,
                 reason="predicted_load_increase"
             )
@@ -630,7 +701,7 @@ class SleepManager:
         # Check for links to sleep
         sleep_candidates = self.get_sleep_candidates()
         for src_dpid, src_port, dst_dpid, dst_port in sleep_candidates:
-            success = await self.initiate_sleep(
+            success = self.initiate_sleep(
                 src_dpid, src_port, dst_dpid, dst_port
             )
             if success:

@@ -104,6 +104,9 @@ class AdaptiveEWMAPredictor:
             lambda: deque(maxlen=20)
         )
 
+        # Track last update time per link (for staleness detection)
+        self._last_update_time: Dict[Tuple[int, int], float] = {}
+
         logger.info(
             "ewma_predictor_initialized",
             base_alpha=base_alpha,
@@ -132,6 +135,9 @@ class AdaptiveEWMAPredictor:
         """
         link_id = (dpid, port_no)
         history = self._history[link_id]
+
+        # Track last update time for staleness detection
+        self._last_update_time[link_id] = time.time()
 
         # Calculate current utilization if not provided
         if stats.utilization == 0.0 and len(history) > 0:
@@ -427,7 +433,8 @@ class AdaptiveEWMAPredictor:
         self,
         dpid: int,
         port_no: int,
-        wake_threshold: float = 60.0
+        wake_threshold: float = 60.0,
+        max_stale_seconds: float = 30.0
     ) -> bool:
         """
         Determine if a sleeping link should be woken up.
@@ -436,13 +443,32 @@ class AdaptiveEWMAPredictor:
             dpid: Datapath ID
             port_no: Port number
             wake_threshold: Load threshold above which to wake (%)
+            max_stale_seconds: Wake link if no stats update for this long (s)
 
         Returns:
             True if link should wake, False otherwise
         """
+        link_id = (dpid, port_no)
+
         prediction = self.get_prediction(dpid, port_no)
         if not prediction:
-            return False
+            # No prediction data at all — if this link is being checked for
+            # wake, it's sleeping with no data to justify it. Wake it up.
+            return True
+
+        # Check if prediction data is stale (sleeping ports don't get stats
+        # updates, so the predictor never sees load increase). If the last
+        # update is older than max_stale_seconds, force a wake so the link
+        # can be re-evaluated with fresh traffic data.
+        last_update = self._last_update_time.get(link_id, 0)
+        if last_update > 0 and (time.time() - last_update) > max_stale_seconds:
+            logger.info(
+                "wake_stale_link",
+                dpid=dpid,
+                port_no=port_no,
+                stale_seconds=round(time.time() - last_update, 1)
+            )
+            return True
 
         # Wake if any prediction exceeds threshold
         if prediction.predicted_load > wake_threshold:
@@ -466,12 +492,14 @@ class AdaptiveEWMAPredictor:
             self._predictions.pop(link_id, None)
             self._alphas.pop(link_id, None)
             self._errors.pop(link_id, None)
+            self._last_update_time.pop(link_id, None)
             logger.info("ewma_link_reset", dpid=dpid, port_no=port_no)
         else:
             self._history.clear()
             self._predictions.clear()
             self._alphas.clear()
             self._errors.clear()
+            self._last_update_time.clear()
             logger.info("ewma_predictor_reset")
 
     def get_stats(self) -> Dict:

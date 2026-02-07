@@ -36,7 +36,7 @@ class ControllerConfig:
     host: str = "127.0.0.1"
     port: int = 8080
     use_mock: bool = False
-    poll_interval: float = 2.0
+    poll_interval: float = 5.0
     trained_model_path: Optional[str] = None
 
 
@@ -61,10 +61,13 @@ class ControllerClient:
         # Local simulation components (used when controller unavailable)
         self._init_local_components()
 
+        # Thread lock for cache access (written by poll thread, read by Flask)
+        self._lock = threading.Lock()
+
         # Cache for data
         self._cache: Dict[str, Any] = {}
         self._cache_time: Dict[str, float] = {}
-        self._cache_ttl = 1.0  # seconds
+        self._cache_ttl = 4.0  # seconds (must be < poll_interval)
 
         # Connection status
         self.connected = False
@@ -72,6 +75,10 @@ class ControllerClient:
 
         # Energy history for charts
         self.energy_history: List[Dict] = []
+
+        # Simulation throttle: prevent multiple calls per cycle
+        self._last_sim_time = 0.0
+        self._sim_interval = 1.0  # minimum seconds between simulations
 
         # Start background polling if using real controller
         self._polling = False
@@ -203,29 +210,33 @@ class ControllerClient:
     def _fetch_all_data(self):
         """Fetch all data from controller REST API."""
         try:
+            new_cache = {}
+            new_times = {}
+            now = time.time()
+
             resp = requests.get(f"{self.base_url}/topology", timeout=5)
             if resp.ok:
-                self._cache["topology"] = resp.json()
-                self._cache_time["topology"] = time.time()
+                new_cache["topology"] = resp.json()
+                new_times["topology"] = now
 
             resp = requests.get(f"{self.base_url}/stats", timeout=5)
             if resp.ok:
-                self._cache["stats"] = resp.json()
-                self._cache_time["stats"] = time.time()
+                new_cache["stats"] = resp.json()
+                new_times["stats"] = now
 
             resp = requests.get(f"{self.base_url}/predictions", timeout=5)
             if resp.ok:
-                self._cache["predictions"] = resp.json()
-                self._cache_time["predictions"] = time.time()
+                new_cache["predictions"] = resp.json()
+                new_times["predictions"] = now
 
             resp = requests.get(f"{self.base_url}/energy", timeout=5)
             if resp.ok:
                 energy_data = resp.json()
-                self._cache["energy"] = energy_data
-                self._cache_time["energy"] = time.time()
+                new_cache["energy"] = energy_data
+                new_times["energy"] = now
                 # Track energy history for charts
                 self.energy_history.append({
-                    "timestamp": time.time(),
+                    "timestamp": now,
                     "savings": energy_data.get("energy_savings_percent", 0),
                     "power": energy_data.get("total_power_watts", 0)
                 })
@@ -234,31 +245,45 @@ class ControllerClient:
 
             resp = requests.get(f"{self.base_url}/qos", timeout=5)
             if resp.ok:
-                self._cache["qos"] = resp.json()
-                self._cache_time["qos"] = time.time()
+                new_cache["qos"] = resp.json()
+                new_times["qos"] = now
 
             resp = requests.get(f"{self.base_url}/events", timeout=5)
             if resp.ok:
-                self._cache["events"] = resp.json()
-                self._cache_time["events"] = time.time()
+                new_cache["events"] = resp.json()
+                new_times["events"] = now
 
             resp = requests.get(f"{self.base_url}/ecmp-comparison", timeout=5)
             if resp.ok:
-                self._cache["ecmp_comparison"] = resp.json()
-                self._cache_time["ecmp_comparison"] = time.time()
+                new_cache["ecmp_comparison"] = resp.json()
+                new_times["ecmp_comparison"] = now
+
+            # Atomically update cache under lock
+            with self._lock:
+                self._cache.update(new_cache)
+                self._cache_time.update(new_times)
 
         except Exception as e:
             logger.warning("Failed to fetch data from controller: %s", e)
 
     def _get_cached(self, key: str) -> Optional[Dict]:
-        """Get cached data if still valid."""
-        if key in self._cache:
-            if time.time() - self._cache_time.get(key, 0) < self._cache_ttl:
-                return self._cache[key]
+        """Get cached data if still valid (thread-safe)."""
+        with self._lock:
+            if key in self._cache:
+                if time.time() - self._cache_time.get(key, 0) < self._cache_ttl:
+                    return self._cache[key]
         return None
 
     def _simulate_traffic(self):
-        """Simulate traffic for local mode with sleep/wake decisions."""
+        """Simulate traffic for local mode with sleep/wake decisions.
+
+        Throttled to avoid running multiple times per poll cycle.
+        """
+        now = time.time()
+        if now - self._last_sim_time < self._sim_interval:
+            return  # Skip if called too recently
+        self._last_sim_time = now
+
         import random
         import numpy as np
 
@@ -433,6 +458,8 @@ class ControllerClient:
             events = cached.get("events", [])
             return events[-limit:]
 
+        # In local simulation mode, ensure we have events
+        self._simulate_traffic()
         return self._events[-limit:]
 
     def get_ecmp_comparison(self) -> Dict:

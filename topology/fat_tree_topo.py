@@ -382,18 +382,42 @@ def run_topology(
     info("*** Starting network\n")
     net.start()
 
-    info("*** Waiting for controller connection\n")
-    time.sleep(5)
+    info("*** Waiting for controller connection and topology discovery\n")
+    time.sleep(15)
 
-    # Test connectivity
-    info("*** Testing connectivity\n")
+    # Proactive host discovery: ping all pairs to populate ARP tables
+    # and trigger flow rule installation in the controller
+    info("*** Running pingAll for full host discovery and flow setup\n")
+    packet_loss = net.pingAll(timeout='2')
+    info(f"*** Initial pingAll packet loss: {packet_loss}%\n")
+
+    # If there was packet loss, wait for flows to settle and retry
+    if packet_loss > 0:
+        info("*** Waiting for flow rules to propagate...\n")
+        time.sleep(5)
+        packet_loss = net.pingAll(timeout='3')
+        info(f"*** Second pingAll packet loss: {packet_loss}%\n")
+
+    if packet_loss == 0:
+        info("*** Full connectivity established - all hosts reachable\n")
+    else:
+        info(f"*** WARNING: {packet_loss}% packet loss remains. "
+             "Ensure controller is running with --observe-links\n")
+
+    # Test specific cross-pod connectivity
+    info("*** Testing cross-pod connectivity\n")
     hosts = net.hosts
     if len(hosts) >= 2:
-        result = hosts[0].cmd(f"ping -c 1 {hosts[1].IP()}")
-        if "1 received" in result:
-            info("*** Connectivity test passed\n")
+        # Pick hosts from different pods (first and last host)
+        h1 = hosts[0]
+        h_last = hosts[-1]
+        result = h1.cmd(f"ping -c 3 -W 2 {h_last.IP()}")
+        if "0% packet loss" in result:
+            info(f"*** Cross-pod test passed: {h1.name} -> {h_last.name}\n")
+        elif "received" in result:
+            info(f"*** Cross-pod test partial: {result.splitlines()[-1]}\n")
         else:
-            info("*** Connectivity test failed\n")
+            info(f"*** Cross-pod test failed: {h1.name} -> {h_last.name}\n")
 
     if with_cli:
         info("*** Running CLI\n")

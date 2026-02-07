@@ -473,8 +473,12 @@ class EnergyAwareRouter:
             )
             scored_paths = [self.score_path(p, bandwidth_required) for p in paths]
 
+        # Prefer paths that use only active links (no sleeping links to wake)
+        active_only = [s for s in scored_paths if s.sleeping_links_used == 0]
+        candidates = active_only if active_only else scored_paths
+
         # Select best path (lowest score)
-        best = min(scored_paths, key=lambda s: s.total_score)
+        best = min(candidates, key=lambda s: s.total_score)
 
         logger.info(
             "best_path_selected",

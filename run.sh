@@ -73,8 +73,17 @@ start_controller() {
     fi
 
     # Start controller in background
-    echo -e "${GREEN}Starting Ryu controller...${NC}"
-    PYTHONPATH="$PROJECT_DIR" ryu-manager \
+    # Try osken-manager first (os-ken package), fall back to ryu-manager
+    echo -e "${GREEN}Starting SDN controller...${NC}"
+    if command -v osken-manager &> /dev/null; then
+        MANAGER_CMD="osken-manager"
+    elif command -v ryu-manager &> /dev/null; then
+        MANAGER_CMD="ryu-manager"
+    else
+        echo -e "${RED}Neither osken-manager nor ryu-manager found. Install os-ken.${NC}"
+        exit 1
+    fi
+    PYTHONPATH="$PROJECT_DIR" $MANAGER_CMD \
         --observe-links \
         controller/ecoroute_controller.py \
         > logs/controller.log 2>&1 &

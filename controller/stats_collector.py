@@ -11,6 +11,7 @@ Handles OpenFlow statistics polling:
 from __future__ import annotations
 
 import csv
+import json
 import os
 import time
 from collections import defaultdict
@@ -287,7 +288,11 @@ class StatsCollector:
 
         for stats in flow_stats:
             # Create unique key for flow
-            match_key = str(sorted(stats.match.items()))
+            # Use json.dumps for safe serialization of potentially nested dicts
+            try:
+                match_key = json.dumps(stats.match, sort_keys=True, default=str)
+            except (TypeError, ValueError):
+                match_key = str(stats.match)
             key = (dpid, match_key)
 
             total_bytes += stats.byte_count
@@ -337,34 +342,40 @@ class StatsCollector:
         """
         current_time = time.time()
 
-        # Aggregate link metrics
-        active_ports = 0
-        sleeping_ports = 0
+        # Aggregate link metrics for utilization
         total_utilization = 0.0
         max_utilization = 0.0
+        metrics_count = 0
 
         for (dpid, port_no), metrics in self._link_metrics.items():
             total_utilization += metrics.utilization_percent
             max_utilization = max(max_utilization, metrics.utilization_percent)
-            active_ports += 1
+            metrics_count += 1
 
         avg_utilization = (
-            total_utilization / active_ports if active_ports > 0 else 0.0
+            total_utilization / metrics_count if metrics_count > 0 else 0.0
         )
 
-        # Get energy stats
+        # Get energy stats — use energy model as single source of truth
+        # for active/sleeping port counts to avoid discrepancies
+        active_ports = 0
+        sleeping_ports = 0
         total_energy = 0.0
         energy_savings = 0.0
 
         if self._get_energy_callback:
             energy_stats = self._get_energy_callback()
             total_energy = energy_stats.get("total_power_watts", 0.0)
+            active_ports = energy_stats.get("active_ports", 0)
             sleeping_ports = energy_stats.get("sleeping_ports", 0)
             if self._ecmp_baseline_energy > 0:
                 energy_savings = (
                     (self._ecmp_baseline_energy - total_energy) /
                     self._ecmp_baseline_energy * 100
                 )
+        else:
+            # Fallback: count from link_metrics if no energy callback
+            active_ports = metrics_count
 
         # Aggregate flow stats
         total_flows = len(self._prev_flow_stats)
@@ -533,21 +544,25 @@ class StatsCollector:
         """
         if not self._snapshots:
             return {
-                "baseline_energy": self._ecmp_baseline_energy,
-                "current_energy": 0.0,
+                "baseline_energy_watts": self._ecmp_baseline_energy,
+                "current_energy_watts": 0.0,
                 "energy_savings_percent": 0.0,
+                "energy_savings_watts": 0.0,
                 "active_ports_reduction_percent": 0.0
             }
 
         latest = self._snapshots[-1]
 
         return {
-            "baseline_energy": self._ecmp_baseline_energy,
-            "current_energy": latest.total_energy_watts,
+            "baseline_energy_watts": self._ecmp_baseline_energy,
+            "current_energy_watts": latest.total_energy_watts,
             "energy_savings_percent": latest.energy_savings_percent,
             "energy_savings_watts": max(
                 0, self._ecmp_baseline_energy - latest.total_energy_watts
             ),
+            "active_ports_reduction_percent": round(
+                (1.0 - latest.active_ports / max(1, latest.active_ports + latest.sleeping_ports)) * 100, 2
+            ) if (latest.active_ports + latest.sleeping_ports) > 0 else 0.0,
             "timestamp": latest.timestamp
         }
 
@@ -557,8 +572,11 @@ class StatsCollector:
             return {
                 "max_packet_loss": 0.0,
                 "avg_packet_loss": 0.0,
-                "max_latency_estimate_ms": 0.0,
-                "qos_violations": 0
+                "max_latency_ms": 0.0,
+                "avg_latency_ms": 0.0,
+                "max_utilization": 0.0,
+                "qos_violations": 0,
+                "throughput_ratio": 1.0
             }
 
         packet_losses = [
@@ -571,16 +589,24 @@ class StatsCollector:
         # Estimate latency increase based on utilization
         # Higher utilization -> higher queuing delay
         max_util = max(utilizations) if utilizations else 0
-        latency_estimate = max_util * 0.1  # Simple model: 0.1ms per % utilization
+        avg_util = sum(utilizations) / len(utilizations) if utilizations else 0
+        max_latency = max_util * 0.1  # Simple model: 0.1ms per % utilization
+        avg_latency = avg_util * 0.05
 
         qos_violations = sum(1 for u in utilizations if u > 80)
 
+        # Throughput ratio: 1.0 = no loss
+        avg_loss = sum(packet_losses) / len(packet_losses) if packet_losses else 0.0
+        throughput_ratio = max(0.0, 1.0 - avg_loss / 100.0)
+
         return {
             "max_packet_loss": max(packet_losses) if packet_losses else 0.0,
-            "avg_packet_loss": sum(packet_losses) / len(packet_losses) if packet_losses else 0.0,
-            "max_latency_estimate_ms": latency_estimate,
+            "avg_packet_loss": avg_loss,
+            "max_latency_ms": round(max_latency, 2),
+            "avg_latency_ms": round(avg_latency, 2),
             "max_utilization": max_util,
-            "qos_violations": qos_violations
+            "qos_violations": qos_violations,
+            "throughput_ratio": round(throughput_ratio, 3)
         }
 
     def get_stats(self) -> Dict:
