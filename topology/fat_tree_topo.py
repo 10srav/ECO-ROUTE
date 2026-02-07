@@ -179,7 +179,9 @@ class FatTreeTopo(Topo):
                     host_name = f"h{host_num}"
 
                     # Generate IP: 10.pod.edge.host
-                    ip = f"10.{pod}.{edge_idx}.{h + 1}/24"
+                    # Use /8 so ALL hosts are in the same L3 network
+                    # (required for cross-pod communication via SDN controller)
+                    ip = f"10.{pod}.{edge_idx}.{h + 1}/8"
                     mac = f"00:00:00:{pod:02x}:{edge_idx:02x}:{h + 1:02x}"
 
                     self.addHost(host_name, ip=ip, mac=mac)

@@ -378,6 +378,27 @@ def get_topology():
     try:
         data_source = get_data_source()
         topology = data_source.get_topology()
+
+        # Ensure nodes are always objects with id and type
+        nodes = topology.get("nodes", [])
+        normalized_nodes = []
+        for n in nodes:
+            if isinstance(n, dict):
+                normalized_nodes.append(n)
+            elif isinstance(n, (int, float)):
+                # Convert plain dpid to node object
+                dpid = int(n)
+                if dpid <= 4:
+                    ntype = "core"
+                elif dpid <= 12:
+                    ntype = "aggregation"
+                else:
+                    ntype = "edge"
+                normalized_nodes.append({"id": dpid, "type": ntype, "dpid": dpid})
+            else:
+                normalized_nodes.append({"id": n, "type": "switch", "dpid": n})
+        topology["nodes"] = normalized_nodes
+
         return jsonify(topology)
     except Exception as e:
         logger.error("topology_fetch_failed", error=str(e))
@@ -422,11 +443,7 @@ def get_energy_history():
     """Get energy history for charts."""
     try:
         data_source = get_data_source()
-        if hasattr(data_source, 'energy_history'):
-            history = data_source.energy_history
-        else:
-            # ControllerClient doesn't have energy_history, build from current stats
-            history = []
+        history = getattr(data_source, 'energy_history', [])
         return jsonify({
             "history": history,
             "timestamp": time.time()
@@ -489,12 +506,16 @@ def get_switches():
     """Get switch information."""
     try:
         data_source = get_data_source()
-        if hasattr(data_source, 'nodes'):
-            switches = [n for n in data_source.nodes if n['type'] != 'host']
-        else:
-            # For ControllerClient, get topology and extract switches
-            topo = data_source.get_topology()
-            switches = [n for n in topo.get('nodes', []) if n.get('type') != 'host']
+        topo = data_source.get_topology()
+        nodes = topo.get('nodes', [])
+        # Handle both object nodes and plain integers
+        switches = []
+        for n in nodes:
+            if isinstance(n, dict):
+                if n.get('type') != 'host':
+                    switches.append(n)
+            else:
+                switches.append({"id": n, "type": "switch", "dpid": n})
         return jsonify({
             "switches": switches,
             "count": len(switches),
@@ -511,11 +532,23 @@ def get_hosts():
     try:
         data_source = get_data_source()
         if hasattr(data_source, 'nodes'):
-            hosts = [n for n in data_source.nodes if n['type'] == 'host']
+            # MockControllerData has nodes list with type field
+            hosts = [n for n in data_source.nodes if isinstance(n, dict) and n.get('type') == 'host']
         else:
-            # For ControllerClient, get topology and extract hosts
+            # ControllerClient: get hosts from topology info
             topo = data_source.get_topology()
-            hosts = [n for n in topo.get('nodes', []) if n.get('type') == 'host']
+            hosts_map = topo.get('hosts', {})
+            hosts = []
+            if isinstance(hosts_map, dict):
+                for ip, dpid_list in hosts_map.items():
+                    # hosts_map is {ip: [dpid1, ...]} from energy_router
+                    connected_dpid = dpid_list[0] if isinstance(dpid_list, list) and dpid_list else 0
+                    hosts.append({
+                        "id": ip,
+                        "type": "host",
+                        "ip": ip,
+                        "dpid": connected_dpid
+                    })
         return jsonify({
             "hosts": hosts,
             "count": len(hosts),

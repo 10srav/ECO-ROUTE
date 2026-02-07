@@ -40,7 +40,7 @@ class TestEnergyAwareRouter:
 
     @pytest.fixture
     def diamond_topology(self, router):
-        """
+        r"""
         Create a diamond topology:
             1
            / \

@@ -407,9 +407,21 @@ function App() {
   );
 }
 
+// Get display label for a node
+function getNodeLabel(node) {
+  const id = node.id;
+  // If id is already a string label (e.g. "c1", "a0_0"), use it directly
+  if (typeof id === 'string' && isNaN(Number(id))) return id;
+  // For numeric IDs, generate a readable label from type
+  const dpid = node.dpid || id;
+  if (node.type === 'core') return `C${dpid}`;
+  if (node.type === 'aggregation') return `A${dpid}`;
+  return `E${dpid}`;
+}
+
 // Topology Visualization Component
 function TopologyView({ topology }) {
-  if (!topology || !topology.nodes) {
+  if (!topology || !topology.nodes || topology.nodes.length === 0) {
     return (
       <div style={{
         display: 'flex',
@@ -423,21 +435,35 @@ function TopologyView({ topology }) {
     );
   }
 
-  const switches = topology.nodes.filter(n => n.type !== 'host');
-  const edges = topology.edges.filter(e =>
-    !e.target.startsWith('h') && !e.source.startsWith('h')
-  );
+  // Normalize nodes: ensure each is an object with id and type
+  const nodeList = topology.nodes.map(n => {
+    if (typeof n === 'object' && n !== null && n.id !== undefined) {
+      return n;
+    }
+    // Fallback: convert plain number/string to node object
+    const dpid = typeof n === 'number' ? n : Number(n);
+    let type = 'edge';
+    if (dpid <= 4) type = 'core';
+    else if (dpid <= 12) type = 'aggregation';
+    return { id: dpid, type, dpid };
+  });
 
-  // Simple force-directed layout simulation
+  const switches = nodeList.filter(n => n.type !== 'host');
+
+  // Filter edges to only switch-to-switch links
+  const switchIds = new Set(switches.map(n => n.id));
+  const edges = (topology.edges || []).filter(e => {
+    return switchIds.has(e.source) && switchIds.has(e.target);
+  });
+
+  // Layout dimensions
   const width = 500;
   const height = 350;
-
-  // Position nodes by type
   const coreY = 50;
   const aggY = 150;
   const edgeY = 250;
 
-  const positionedNodes = switches.map((node, idx) => {
+  const positionedNodes = switches.map((node) => {
     let x, y;
     if (node.type === 'core') {
       const coreNodes = switches.filter(n => n.type === 'core');
@@ -458,15 +484,24 @@ function TopologyView({ topology }) {
     return { ...node, x, y };
   });
 
+  // Build node lookup map supporting both numeric and string keys
   const nodeMap = {};
-  positionedNodes.forEach(n => { nodeMap[n.id] = n; });
+  positionedNodes.forEach(n => {
+    nodeMap[n.id] = n;
+    // Also index by string version so lookups work regardless of type
+    nodeMap[String(n.id)] = n;
+  });
+
+  // Count sleeping vs active links for summary
+  const sleepingCount = edges.filter(e => e.sleeping).length;
+  const activeCount = edges.length - sleepingCount;
 
   return (
     <svg className="topology-svg" viewBox={`0 0 ${width} ${height}`}>
       {/* Draw edges */}
       {edges.map((edge, idx) => {
-        const source = nodeMap[edge.source];
-        const target = nodeMap[edge.target];
+        const source = nodeMap[edge.source] || nodeMap[String(edge.source)];
+        const target = nodeMap[edge.target] || nodeMap[String(edge.target)];
         if (!source || !target) return null;
 
         return (
@@ -479,6 +514,7 @@ function TopologyView({ topology }) {
             className={`topology-link ${edge.sleeping ? 'sleeping' : 'active'}`}
             stroke={edge.sleeping ? '#ff4757' : '#00ff88'}
             strokeOpacity={0.6}
+            strokeDasharray={edge.sleeping ? '4,3' : 'none'}
           />
         );
       })}
@@ -501,10 +537,15 @@ function TopologyView({ topology }) {
             fontSize="8"
             fill="#a0a0a0"
           >
-            {node.id}
+            {getNodeLabel(node)}
           </text>
         </g>
       ))}
+
+      {/* Summary text */}
+      <text x={width - 10} y="15" textAnchor="end" fontSize="9" fill="#a0a0a0">
+        {switches.length} switches | {activeCount} active | {sleepingCount} sleeping
+      </text>
 
       {/* Legend */}
       <g transform="translate(10, 310)">

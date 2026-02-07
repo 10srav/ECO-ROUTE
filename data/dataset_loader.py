@@ -64,7 +64,7 @@ class DataCenterTrafficGenerator:
     Generates realistic data center traffic patterns based on published research.
 
     Based on characteristics from:
-    - "Network Traffic Characteristics of Data Centers in the Wild" (IMC 2010)
+    - "Network Traffic Characteristics of Dclata Centers in the Wild" (IMC 2010)
     - "Inside the Social Network's (Datacenter) Network" (SIGCOMM 2015)
     - Microsoft and Facebook data center studies
     """

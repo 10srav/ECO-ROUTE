@@ -157,7 +157,8 @@ class AdaptiveEWMAPredictor:
         # Calculate prediction error from previous prediction
         prev_prediction = self._predictions[link_id]
         if prev_prediction > 0:
-            error = abs(current_load - prev_prediction) / max(prev_prediction, 1.0)
+            # Normalize error against max load (100%) for stable confidence values
+            error = abs(current_load - prev_prediction) / 100.0
             self._errors[link_id].append(error)
 
         # Adapt alpha based on traffic variance (burst detection)
@@ -407,8 +408,9 @@ class AdaptiveEWMAPredictor:
         if stable_duration < min_duration * 0.5:  # Half the duration as warmup
             return False
 
-        # High confidence in prediction
-        if prediction.confidence < 0.6:
+        # Require reasonable confidence in prediction (0.5 threshold allows
+        # earlier sleep decisions while still filtering out noisy predictions)
+        if prediction.confidence < 0.5:
             return False
 
         logger.info(

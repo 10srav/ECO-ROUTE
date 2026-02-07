@@ -19,7 +19,7 @@ Version: 1.0.0
 
 from __future__ import annotations
 
-import asyncio
+import json
 import os
 import sys
 import time
@@ -28,19 +28,21 @@ from threading import Thread
 from typing import Dict, List, Optional, Set, Tuple
 
 import yaml
-from ryu.base import app_manager
-from ryu.controller import ofp_event
-from ryu.controller.handler import (
+from os_ken.base import app_manager
+from os_ken.controller import ofp_event
+from os_ken.controller.handler import (
     CONFIG_DISPATCHER,
     DEAD_DISPATCHER,
     MAIN_DISPATCHER,
     set_ev_cls,
 )
-from ryu.lib import hub
-from ryu.lib.packet import arp, ethernet, icmp, ipv4, packet, tcp, udp
-from ryu.ofproto import ofproto_v1_3
-from ryu.topology import event as topo_event
-from ryu.topology.api import get_all_link, get_all_switch
+from os_ken.lib import hub
+from os_ken.lib.packet import arp, ethernet, icmp, ipv4, packet, tcp, udp
+from os_ken.ofproto import ofproto_v1_3
+from os_ken.topology import event as topo_event
+from os_ken.topology.api import get_all_link, get_all_switch
+from os_ken.app.wsgi import ControllerBase, WSGIApplication, route
+from webob import Response
 
 import structlog
 
@@ -98,7 +100,7 @@ def load_config(config_path: str = "config.yaml") -> Dict:
         return {}
 
 
-class EcoRouteController(app_manager.RyuApp):
+class EcoRouteController(app_manager.OSKenApp):
     """
     EcoRoute Energy-Aware SDN Controller
 
@@ -107,12 +109,18 @@ class EcoRouteController(app_manager.RyuApp):
     - Energy-aware routing
     - Link sleep/wake management
     - Statistics collection
+    - REST API for dashboard (via WSGI on port 8080)
     """
 
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
+    _CONTEXTS = {'wsgi': WSGIApplication}
 
     def __init__(self, *args, **kwargs):
         super(EcoRouteController, self).__init__(*args, **kwargs)
+
+        # Register REST API
+        wsgi = kwargs['wsgi']
+        wsgi.register(EcoRouteRestAPI, {'ecoroute_app': self})
 
         # Load configuration
         self.config = load_config()
@@ -703,6 +711,9 @@ class EcoRouteController(app_manager.RyuApp):
             capacity=1000.0  # Default 1 Gbps
         )
 
+        # Auto-classify node types for fat-tree topology
+        self.router.classify_fat_tree_nodes()
+
         logger.info(
             "link_discovered",
             src_dpid=src.dpid,
@@ -917,3 +928,87 @@ class EcoRouteController(app_manager.RyuApp):
         """Cleanup on shutdown."""
         self._running = False
         logger.info("ecoroute_controller_shutdown")
+
+
+class EcoRouteRestAPI(ControllerBase):
+    """REST API for EcoRoute controller (exposed on port 8080 via WSGI)."""
+
+    def __init__(self, req, link, data, **config):
+        super().__init__(req, link, data, **config)
+        self.ecoroute_app = data['ecoroute_app']
+
+    def _json_response(self, data):
+        """Create a JSON response with CORS headers."""
+        body = json.dumps(data, default=str)
+        return Response(
+            content_type='application/json',
+            body=body,
+            charset='utf-8',
+            headers={
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Methods': 'GET, OPTIONS',
+                'Access-Control-Allow-Headers': 'Content-Type',
+            }
+        )
+
+    @route('ecoroute', '/stats', methods=['GET'])
+    def get_stats(self, req, **kwargs):
+        """Get comprehensive network statistics."""
+        stats = self.ecoroute_app.get_network_stats()
+        return self._json_response(stats)
+
+    @route('ecoroute', '/topology', methods=['GET'])
+    def get_topology(self, req, **kwargs):
+        """Get topology for dashboard visualization."""
+        topology = self.ecoroute_app.get_topology()
+        return self._json_response(topology)
+
+    @route('ecoroute', '/energy', methods=['GET'])
+    def get_energy(self, req, **kwargs):
+        """Get energy consumption statistics."""
+        energy = self.ecoroute_app.energy_model.get_stats()
+        return self._json_response(energy)
+
+    @route('ecoroute', '/predictions', methods=['GET'])
+    def get_predictions(self, req, **kwargs):
+        """Get EWMA traffic predictions."""
+        preds = self.ecoroute_app.predictor.get_all_predictions()
+        predictions_list = []
+        for link_id, pred in list(preds.items())[:20]:
+            predictions_list.append({
+                "link": f"link_{link_id[0]}_{link_id[1]}",
+                "current_load": round(pred.current_load, 2),
+                "predicted_load": round(pred.predicted_load, 2),
+                "confidence": round(pred.confidence, 2),
+                "trend": pred.trend
+            })
+        avg_conf = (
+            sum(p["confidence"] for p in predictions_list) / len(predictions_list)
+            if predictions_list else 0
+        )
+        return self._json_response({
+            "predictions": predictions_list,
+            "average_confidence": round(avg_conf, 2),
+            "timestamp": time.time()
+        })
+
+    @route('ecoroute', '/qos', methods=['GET'])
+    def get_qos(self, req, **kwargs):
+        """Get QoS metrics."""
+        qos = self.ecoroute_app.stats_collector.get_qos_metrics()
+        return self._json_response(qos)
+
+    @route('ecoroute', '/events', methods=['GET'])
+    def get_events(self, req, **kwargs):
+        """Get recent sleep/wake events."""
+        events = self.ecoroute_app.energy_model.get_events()
+        return self._json_response({
+            "events": events,
+            "timestamp": time.time()
+        })
+
+    @route('ecoroute', '/ecmp-comparison', methods=['GET'])
+    def get_ecmp_comparison(self, req, **kwargs):
+        """Get ECMP baseline comparison."""
+        ecmp = self.ecoroute_app.stats_collector.get_ecmp_comparison()
+        return self._json_response(ecmp)

@@ -113,6 +113,9 @@ class EnergyAwareRouter:
         # Host to switch mapping: host_ip -> (dpid, port)
         self._host_map: Dict[str, Tuple[int, int]] = {}
 
+        # Node type classification: dpid -> "core"/"aggregation"/"edge"
+        self._node_types: Dict[int, str] = {}
+
         logger.info(
             "energy_router_initialized",
             k_paths=k_paths,
@@ -120,6 +123,24 @@ class EnergyAwareRouter:
             load_weight=load_weight,
             max_utilization=max_utilization
         )
+
+    def set_node_type(self, dpid: int, node_type: str):
+        """Set the type of a node (core, aggregation, edge)."""
+        self._node_types[dpid] = node_type
+
+    def classify_fat_tree_nodes(self, k: int = 4):
+        """Classify all nodes based on fat-tree topology structure."""
+        num_core = (k // 2) ** 2
+        num_agg_per_pod = k // 2
+        num_pods = k
+
+        for dpid in self._graph.nodes():
+            if dpid <= num_core:
+                self._node_types[dpid] = "core"
+            elif dpid <= num_core + num_pods * num_agg_per_pod:
+                self._node_types[dpid] = "aggregation"
+            else:
+                self._node_types[dpid] = "edge"
 
     def add_link(
         self,
@@ -700,10 +721,25 @@ class EnergyAwareRouter:
         return candidates
 
     def get_topology_info(self) -> Dict:
-        """Get topology information for dashboard."""
-        nodes = list(self._graph.nodes())
-        edges = []
+        """Get topology information for dashboard.
 
+        Returns nodes as objects with id, type, and dpid fields
+        so the frontend can render them correctly.
+        """
+        # Auto-classify if node types not set
+        if not self._node_types and self._graph.number_of_nodes() > 0:
+            self.classify_fat_tree_nodes()
+
+        nodes = []
+        for dpid in self._graph.nodes():
+            node_type = self._node_types.get(dpid, "edge")
+            nodes.append({
+                "id": dpid,
+                "type": node_type,
+                "dpid": dpid
+            })
+
+        edges = []
         for src, dst in self._graph.edges():
             link_info = self._link_info.get((src, dst))
             if link_info:
@@ -730,7 +766,7 @@ class EnergyAwareRouter:
             "total_nodes": len(nodes),
             "total_edges": len(edges),
             "active_flows": len(self._flows),
-            "hosts": dict(self._host_map)
+            "hosts": {k: list(v) for k, v in self._host_map.items()}
         }
 
     def get_stats(self) -> Dict:
@@ -764,4 +800,5 @@ class EnergyAwareRouter:
         self._link_utilization.clear()
         self._flows.clear()
         self._host_map.clear()
+        self._node_types.clear()
         logger.info("energy_router_reset")

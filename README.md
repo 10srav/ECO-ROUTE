@@ -1,40 +1,59 @@
 # EcoRoute: Energy-Aware Dynamic Traffic Engineering in SDN Data Center Networks
 
-A production-grade Ryu SDN controller that achieves **25-35% network energy savings** by intelligently sleeping unused links during low-load periods while maintaining QoS guarantees.
+A production-grade SDN controller (os-ken/OpenFlow 1.3) that achieves **25-35% network energy savings** by intelligently sleeping unused links during low-load periods while maintaining QoS guarantees.
 
 ![EcoRoute Dashboard](dashboard_screenshot.png)
 
 ## Features
 
-- **Predictive EWMA Traffic Forecasting**: Adaptive exponentially weighted moving average with burst detection
-- **Enhanced Greedy Routing**: K-shortest paths with energy-aware path scoring using NetworkX
-- **Make-Before-Break Link Sleep**: Safe link transitions with flow rerouting
+- **Predictive EWMA Traffic Forecasting**: Adaptive exponentially weighted moving average with burst detection and confidence-based sleep decisions
+- **Enhanced Greedy Routing**: K-shortest paths (Yen's algorithm) with energy-aware path scoring using NetworkX
+- **Make-Before-Break Link Sleep**: Safe link transitions with flow rerouting before sleeping ports
 - **QoS-Aware Routing**: Respects utilization constraints (<80%), packet loss (<0.1%), and latency limits
-- **Real-time Dashboard**: React-based visualization with topology heatmaps and metrics
-- **Fat-Tree Topology**: Standard k=4 data center topology with 20 switches
+- **Real-time Dashboard**: React 18 visualization with live topology, energy charts, EWMA predictions, and QoS metrics
+- **Fat-Tree Topology**: Standard k=4 data center topology (20 switches, 16 hosts, full cross-pod connectivity)
+- **Controller REST API**: WSGI-based REST API on port 8080 for real-time dashboard integration (no mock data)
 
 ## Architecture
 
 ```
-ecoroute/
+EcoRoute/
 ├── controller/
-│   ├── ecoroute_controller.py  # Main Ryu controller
+│   ├── ecoroute_controller.py  # Main os-ken controller + WSGI REST API (port 8080)
 │   ├── ewma_predictor.py       # Adaptive EWMA traffic prediction
-│   ├── energy_router.py        # Enhanced greedy path selection
+│   ├── energy_router.py        # Enhanced greedy path selection + topology info
 │   ├── energy_model.py         # Switch/port power modeling
 │   ├── sleep_manager.py        # Make-before-break logic
-│   └── stats_collector.py      # OpenFlow stats polling
+│   └── stats_collector.py      # OpenFlow stats polling + QoS metrics
 ├── dashboard/
-│   ├── flask_api.py            # REST API for dashboard
-│   └── frontend/               # React dashboard app
+│   ├── flask_api.py            # Dashboard REST API (port 5000)
+│   ├── controller_client.py    # Connects to controller REST API (port 8080)
+│   └── frontend/               # React 18 dashboard app (port 3000)
 ├── topology/
-│   └── fat_tree_topo.py        # Mininet fat-tree topology
+│   └── fat_tree_topo.py        # Mininet fat-tree topology (k=4)
+├── training/                   # EWMA model training pipeline
 ├── benchmarks/
 │   └── traffic_test.py         # Traffic patterns & benchmarks
-├── tests/                      # Unit tests
-├── config.yaml                 # Configuration
+├── tests/                      # Unit tests (pytest)
+├── config.yaml                 # Configuration thresholds
 ├── docker-compose.yml          # Docker deployment
 └── run.sh                      # Quick start script
+```
+
+### Data Flow
+
+```
+RYU Controller (port 8080, WSGI REST API)
+    │  Endpoints: /stats, /topology, /energy, /predictions, /qos, /events
+    ▼
+Controller Client (polls + caches, falls back to local simulation)
+    │  get_topology(), get_energy_stats(), get_predictions(), etc.
+    ▼
+Flask Dashboard API (port 5000, REST + SocketIO)
+    │  /api/stats, /api/topology, /api/energy, /api/predictions, etc.
+    ▼
+React Frontend (port 3000, polls every 2s)
+    Topology SVG, Energy Charts, QoS Metrics, Events, EWMA Predictions
 ```
 
 ## Quick Start
@@ -59,44 +78,51 @@ pip install -r requirements.txt
 cd dashboard/frontend && npm install && cd ../..
 ```
 
-### Running the Controller
+### Running the System
 
+**Terminal 1 - Start the SDN Controller** (port 6653 for OpenFlow, port 8080 for REST API):
 ```bash
-# Option 1: Quick start script
-chmod +x run.sh
-./run.sh start
-
-# Option 2: Manual start
 ryu-manager --observe-links controller/ecoroute_controller.py
-
-# Option 3: Docker
-docker-compose up -d
 ```
 
-### Running the Topology
-
-In a separate terminal (requires sudo):
-
+**Terminal 2 - Start the Fat-Tree Topology** (requires sudo/Mininet):
 ```bash
-# Start fat-tree topology
 sudo python3 topology/fat_tree_topo.py --k 4 --controller 127.0.0.1:6653
-
-# Or use Mininet directly
-sudo mn --custom topology/fat_tree_topo.py --topo fattree --controller remote
 ```
 
-### Running the Dashboard
-
+**Terminal 3 - Start the Dashboard API** (port 5000):
 ```bash
-# Start API server
 python3 dashboard/flask_api.py --port 5000
+```
 
-# Start React frontend (development)
-cd dashboard/frontend
-npm start
+**Terminal 4 - Start the React Frontend** (port 3000):
+```bash
+cd dashboard/frontend && npm install && npm start
 ```
 
 Access the dashboard at: **http://localhost:3000**
+
+### Quick Start (Alternative)
+
+```bash
+# Using the run script
+chmod +x run.sh
+./run.sh start
+
+# Or using Docker
+docker-compose up -d
+```
+
+### Verifying Connectivity
+
+```bash
+# In Mininet console - test cross-pod communication
+mininet> pingall
+
+# Generate traffic between hosts in different pods
+mininet> h1 ping h16 &
+mininet> iperf h1 h16
+```
 
 ## Algorithm Details
 
@@ -201,15 +227,37 @@ python3 benchmarks/traffic_test.py --run-all --baseline --export results.csv
 
 ## API Endpoints
 
+### Controller REST API (port 8080)
+
+These endpoints are served directly by the os-ken controller via WSGI:
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /stats` | Comprehensive network statistics |
+| `GET /topology` | Network topology with node types and link states |
+| `GET /energy` | Energy consumption from energy model |
+| `GET /predictions` | EWMA traffic predictions per link |
+| `GET /qos` | QoS metrics (latency, packet loss, throughput) |
+| `GET /events` | Sleep/wake event history |
+| `GET /ecmp-comparison` | ECMP baseline comparison |
+
+### Dashboard API (port 5000)
+
+These endpoints are served by Flask and proxy data from the controller:
+
 | Endpoint | Description |
 |----------|-------------|
 | `GET /api/health` | Health check |
-| `GET /api/topology` | Network topology with link states |
-| `GET /api/stats` | Comprehensive statistics |
+| `GET /api/topology` | Normalized topology (nodes as objects) |
+| `GET /api/stats` | Comprehensive statistics (energy, QoS, predictions) |
 | `GET /api/energy` | Energy consumption metrics |
+| `GET /api/energy/history` | Energy savings time series for charts |
 | `GET /api/predictions` | EWMA predictions |
+| `GET /api/qos` | QoS metrics |
 | `GET /api/events` | Sleep/wake event history |
 | `GET /api/ecmp-comparison` | ECMP baseline comparison |
+| `GET /api/switches` | Switch information with types |
+| `GET /api/hosts` | Host information with connected switches |
 
 ## Docker Deployment
 
@@ -248,6 +296,15 @@ docker-compose down
 
 ## Troubleshooting
 
+### Port Assignments
+
+| Port | Service |
+|------|---------|
+| 6653 | OpenFlow controller |
+| 8080 | Controller REST API (WSGI) |
+| 5000 | Dashboard Flask API |
+| 3000 | React frontend (development) |
+
 ### Controller not connecting
 ```bash
 # Check if controller is running
@@ -255,6 +312,9 @@ ps aux | grep ryu-manager
 
 # Check OpenFlow port
 netstat -tlnp | grep 6653
+
+# Check REST API
+curl http://localhost:8080/stats
 ```
 
 ### Mininet issues
@@ -268,8 +328,11 @@ sudo ovs-vsctl show
 
 ### Dashboard not loading
 ```bash
-# Check API server
+# Check Flask API server
 curl http://localhost:5000/api/health
+
+# Check controller REST API connectivity
+curl http://localhost:8080/topology
 
 # Check frontend
 cd dashboard/frontend && npm start
@@ -290,8 +353,18 @@ MIT License - See LICENSE file
 
 EcoRoute Team
 
+## Tech Stack
+
+- **SDN Framework**: os-ken (Ryu fork), OpenFlow 1.3
+- **Graph Algorithms**: NetworkX (Yen's k-shortest paths)
+- **Backend**: Flask + Flask-SocketIO, WSGI REST API
+- **Frontend**: React 18, Recharts, Axios
+- **Network Emulation**: Mininet with fat-tree topology
+- **Testing**: pytest with coverage
+- **Deployment**: Docker Compose
+
 ## Acknowledgments
 
-- Ryu SDN Framework
+- os-ken SDN Framework (Ryu fork)
 - Mininet Network Emulator
 - NetworkX for graph algorithms

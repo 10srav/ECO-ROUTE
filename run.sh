@@ -66,10 +66,10 @@ start_controller() {
     # Create logs directory
     mkdir -p logs
 
-    # Check if Ryu is installed
-    if ! python3 -c "import ryu" 2>/dev/null; then
-        echo -e "${YELLOW}Ryu not found. Installing...${NC}"
-        pip3 install ryu
+    # Check if os-ken (Ryu fork) is installed
+    if ! python3 -c "import os_ken" 2>/dev/null; then
+        echo -e "${YELLOW}os-ken not found. Installing...${NC}"
+        pip3 install os-ken
     fi
 
     # Start controller in background
