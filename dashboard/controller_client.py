@@ -10,16 +10,18 @@ Falls back to local simulation when controller is unavailable.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import threading
 import time
-from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -119,8 +121,8 @@ class ControllerClient:
             try:
                 with open(path, 'r') as f:
                     return json.load(f)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Failed to load trained model from %s: %s", path, e)
 
         return {}
 
@@ -192,7 +194,8 @@ class ControllerClient:
         try:
             resp = requests.get(f"{self.base_url}/stats", timeout=2)
             self.connected = resp.status_code == 200
-        except Exception:
+        except Exception as e:
+            logger.debug("Controller connection check failed: %s", e)
             self.connected = False
 
         self._last_check = time.time()
@@ -244,8 +247,8 @@ class ControllerClient:
                 self._cache["ecmp_comparison"] = resp.json()
                 self._cache_time["ecmp_comparison"] = time.time()
 
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to fetch data from controller: %s", e)
 
     def _get_cached(self, key: str) -> Optional[Dict]:
         """Get cached data if still valid."""
@@ -325,8 +328,8 @@ class ControllerClient:
                 resp = requests.get(f"{self.base_url}/topology", timeout=5)
                 if resp.ok:
                     return resp.json()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Topology fetch from controller failed: %s", e)
 
         # Fall back to local simulation
         self._simulate_traffic()
@@ -343,8 +346,8 @@ class ControllerClient:
                 resp = requests.get(f"{self.base_url}/energy", timeout=5)
                 if resp.ok:
                     return resp.json()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Energy fetch from controller failed: %s", e)
 
         # Local simulation
         self._simulate_traffic()
@@ -361,8 +364,8 @@ class ControllerClient:
                 resp = requests.get(f"{self.base_url}/predictions", timeout=5)
                 if resp.ok:
                     return resp.json()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Predictions fetch from controller failed: %s", e)
 
         # Local simulation
         self._simulate_traffic()
@@ -397,8 +400,8 @@ class ControllerClient:
                 resp = requests.get(f"{self.base_url}/qos", timeout=5)
                 if resp.ok:
                     return resp.json()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("QoS fetch from controller failed: %s", e)
 
         # Compute QoS from predictor state (not random!)
         all_preds = self.predictor.get_all_predictions()
@@ -443,8 +446,8 @@ class ControllerClient:
                 resp = requests.get(f"{self.base_url}/ecmp-comparison", timeout=5)
                 if resp.ok:
                     return resp.json()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("ECMP comparison fetch from controller failed: %s", e)
 
         stats = self.get_energy_stats()
         baseline = stats.get("baseline_power_watts", 1000)

@@ -711,9 +711,6 @@ class EcoRouteController(app_manager.OSKenApp):
             capacity=1000.0  # Default 1 Gbps
         )
 
-        # Auto-classify node types for fat-tree topology
-        self.router.classify_fat_tree_nodes()
-
         logger.info(
             "link_discovered",
             src_dpid=src.dpid,
@@ -951,64 +948,121 @@ class EcoRouteRestAPI(ControllerBase):
             }
         )
 
-    @route('ecoroute', '/stats', methods=['GET'])
+    def _cors_preflight_response(self):
+        """Return an empty response with CORS headers for OPTIONS preflight."""
+        return Response(
+            status=204,
+            headers={
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Methods': 'GET, OPTIONS',
+                'Access-Control-Allow-Headers': 'Content-Type',
+            }
+        )
+
+    def _error_response(self, error, status=500):
+        """Create an error JSON response."""
+        return self._json_response({"error": str(error), "status": status})
+
+    @route('ecoroute', '/stats', methods=['GET', 'OPTIONS'])
     def get_stats(self, req, **kwargs):
         """Get comprehensive network statistics."""
-        stats = self.ecoroute_app.get_network_stats()
-        return self._json_response(stats)
+        if req.method == 'OPTIONS':
+            return self._cors_preflight_response()
+        try:
+            stats = self.ecoroute_app.get_network_stats()
+            return self._json_response(stats)
+        except Exception as e:
+            logger.error("rest_api_stats_error", error=str(e))
+            return self._error_response(e)
 
-    @route('ecoroute', '/topology', methods=['GET'])
+    @route('ecoroute', '/topology', methods=['GET', 'OPTIONS'])
     def get_topology(self, req, **kwargs):
         """Get topology for dashboard visualization."""
-        topology = self.ecoroute_app.get_topology()
-        return self._json_response(topology)
+        if req.method == 'OPTIONS':
+            return self._cors_preflight_response()
+        try:
+            topology = self.ecoroute_app.get_topology()
+            return self._json_response(topology)
+        except Exception as e:
+            logger.error("rest_api_topology_error", error=str(e))
+            return self._error_response(e)
 
-    @route('ecoroute', '/energy', methods=['GET'])
+    @route('ecoroute', '/energy', methods=['GET', 'OPTIONS'])
     def get_energy(self, req, **kwargs):
         """Get energy consumption statistics."""
-        energy = self.ecoroute_app.energy_model.get_stats()
-        return self._json_response(energy)
+        if req.method == 'OPTIONS':
+            return self._cors_preflight_response()
+        try:
+            energy = self.ecoroute_app.energy_model.get_stats()
+            return self._json_response(energy)
+        except Exception as e:
+            logger.error("rest_api_energy_error", error=str(e))
+            return self._error_response(e)
 
-    @route('ecoroute', '/predictions', methods=['GET'])
+    @route('ecoroute', '/predictions', methods=['GET', 'OPTIONS'])
     def get_predictions(self, req, **kwargs):
         """Get EWMA traffic predictions."""
-        preds = self.ecoroute_app.predictor.get_all_predictions()
-        predictions_list = []
-        for link_id, pred in list(preds.items())[:20]:
-            predictions_list.append({
-                "link": f"link_{link_id[0]}_{link_id[1]}",
-                "current_load": round(pred.current_load, 2),
-                "predicted_load": round(pred.predicted_load, 2),
-                "confidence": round(pred.confidence, 2),
-                "trend": pred.trend
+        if req.method == 'OPTIONS':
+            return self._cors_preflight_response()
+        try:
+            preds = self.ecoroute_app.predictor.get_all_predictions()
+            predictions_list = []
+            for link_id, pred in list(preds.items())[:20]:
+                predictions_list.append({
+                    "link": f"link_{link_id[0]}_{link_id[1]}",
+                    "current_load": round(pred.current_load, 2),
+                    "predicted_load": round(pred.predicted_load, 2),
+                    "confidence": round(pred.confidence, 2),
+                    "trend": pred.trend
+                })
+            avg_conf = (
+                sum(p["confidence"] for p in predictions_list) / len(predictions_list)
+                if predictions_list else 0
+            )
+            return self._json_response({
+                "predictions": predictions_list,
+                "average_confidence": round(avg_conf, 2),
+                "timestamp": time.time()
             })
-        avg_conf = (
-            sum(p["confidence"] for p in predictions_list) / len(predictions_list)
-            if predictions_list else 0
-        )
-        return self._json_response({
-            "predictions": predictions_list,
-            "average_confidence": round(avg_conf, 2),
-            "timestamp": time.time()
-        })
+        except Exception as e:
+            logger.error("rest_api_predictions_error", error=str(e))
+            return self._error_response(e)
 
-    @route('ecoroute', '/qos', methods=['GET'])
+    @route('ecoroute', '/qos', methods=['GET', 'OPTIONS'])
     def get_qos(self, req, **kwargs):
         """Get QoS metrics."""
-        qos = self.ecoroute_app.stats_collector.get_qos_metrics()
-        return self._json_response(qos)
+        if req.method == 'OPTIONS':
+            return self._cors_preflight_response()
+        try:
+            qos = self.ecoroute_app.stats_collector.get_qos_metrics()
+            return self._json_response(qos)
+        except Exception as e:
+            logger.error("rest_api_qos_error", error=str(e))
+            return self._error_response(e)
 
-    @route('ecoroute', '/events', methods=['GET'])
+    @route('ecoroute', '/events', methods=['GET', 'OPTIONS'])
     def get_events(self, req, **kwargs):
         """Get recent sleep/wake events."""
-        events = self.ecoroute_app.energy_model.get_events()
-        return self._json_response({
-            "events": events,
-            "timestamp": time.time()
-        })
+        if req.method == 'OPTIONS':
+            return self._cors_preflight_response()
+        try:
+            events = self.ecoroute_app.energy_model.get_events()
+            return self._json_response({
+                "events": events,
+                "timestamp": time.time()
+            })
+        except Exception as e:
+            logger.error("rest_api_events_error", error=str(e))
+            return self._error_response(e)
 
-    @route('ecoroute', '/ecmp-comparison', methods=['GET'])
+    @route('ecoroute', '/ecmp-comparison', methods=['GET', 'OPTIONS'])
     def get_ecmp_comparison(self, req, **kwargs):
         """Get ECMP baseline comparison."""
-        ecmp = self.ecoroute_app.stats_collector.get_ecmp_comparison()
-        return self._json_response(ecmp)
+        if req.method == 'OPTIONS':
+            return self._cors_preflight_response()
+        try:
+            ecmp = self.ecoroute_app.stats_collector.get_ecmp_comparison()
+            return self._json_response(ecmp)
+        except Exception as e:
+            logger.error("rest_api_ecmp_error", error=str(e))
+            return self._error_response(e)

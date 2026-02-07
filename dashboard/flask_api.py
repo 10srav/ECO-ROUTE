@@ -56,7 +56,11 @@ logger = structlog.get_logger(__name__)
 
 # Initialize Flask app
 app = Flask(__name__, static_folder='frontend/build', static_url_path='')
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'ecoroute-secret-key')
+_secret_key = os.environ.get('SECRET_KEY')
+if not _secret_key:
+    logger.warning("SECRET_KEY not set in environment, using insecure default. Set SECRET_KEY env var in production.")
+    _secret_key = 'ecoroute-secret-key'
+app.config['SECRET_KEY'] = _secret_key
 
 # Enable CORS
 CORS(app, resources={r"/api/*": {"origins": "*"}})
@@ -541,7 +545,7 @@ def get_hosts():
             hosts = []
             if isinstance(hosts_map, dict):
                 for ip, dpid_list in hosts_map.items():
-                    # hosts_map is {ip: [dpid1, ...]} from energy_router
+                    # hosts_map is {ip: [dpid, port]} from energy_router
                     connected_dpid = dpid_list[0] if isinstance(dpid_list, list) and dpid_list else 0
                     hosts.append({
                         "id": ip,
