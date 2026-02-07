@@ -131,8 +131,10 @@ stop_services() {
         rm logs/dashboard.pid
     fi
 
-    # Kill any remaining ryu processes
+    # Kill any remaining ryu/osken processes
     pkill -f "ryu-manager" 2>/dev/null || true
+    pkill -f "osken-manager" 2>/dev/null || true
+    pkill -f "start_controller.py" 2>/dev/null || true
     pkill -f "flask_api.py" 2>/dev/null || true
 
     echo -e "${GREEN}All services stopped.${NC}"

@@ -114,6 +114,7 @@ class EcoRouteController(app_manager.OSKenApp):
 
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
     _CONTEXTS = {'wsgi': WSGIApplication}
+    _LLDP_MAGIC = b'\xec\x01'  # Magic prefix for EcoRoute LLDP frames
 
     def __init__(self, *args, **kwargs):
         super(EcoRouteController, self).__init__(*args, **kwargs)
@@ -350,6 +351,12 @@ class EcoRouteController(app_manager.OSKenApp):
 
         # Non-ARP/non-IPv4: drop to prevent broadcast storms
         # (LLDP is already filtered above)
+        logger.debug(
+            "unhandled_ethertype_dropped",
+            dpid=dpid,
+            in_port=in_port,
+            ethertype=hex(eth.ethertype)
+        )
         return
 
     def _handle_arp(self, datapath, in_port, eth, arp_pkt, data):
@@ -364,9 +371,10 @@ class EcoRouteController(app_manager.OSKenApp):
         if in_port in switch_ports:
             return
 
-        # Register host — only if new or updating on the SAME switch
-        # (prevents corruption from flooded packets before link discovery)
-        if src_ip not in self.hosts or self.hosts[src_ip][0] == dpid:
+        # Register host — allow updates from any edge switch (host mobility)
+        # Only skip if the same switch+port is already recorded (no change)
+        existing = self.hosts.get(src_ip)
+        if existing is None or existing != (dpid, in_port, src_mac):
             self.hosts[src_ip] = (dpid, in_port, src_mac)
             self.arp_table[src_ip] = src_mac
             self.router.add_host(src_ip, dpid, in_port)
@@ -513,6 +521,8 @@ class EcoRouteController(app_manager.OSKenApp):
                     self._wake_link(lsrc, lsrc_port, ldst, ldst_port)
                     self.predictor.reset(lsrc, lsrc_port)
                     self.predictor.reset(ldst, ldst_port)
+            # Wait for ports to become operational before installing flows
+            hub.sleep(self.energy_model._wake_latency_ms / 1000.0)
             logger.info(
                 "on_demand_wake",
                 src_dpid=dpid,
@@ -732,16 +742,33 @@ class EcoRouteController(app_manager.OSKenApp):
         if not lldp_pkt or len(lldp_pkt.tlvs) < 2:
             return
 
-        # TLV 0: Chassis ID = dpid as binary, TLV 1: Port ID = port_no
+        # TLV 0: Chassis ID = magic + dpid as binary, TLV 1: Port ID = port_no
         try:
             chassis_tlv = lldp_pkt.tlvs[0]
             port_tlv = lldp_pkt.tlvs[1]
 
-            # Chassis ID: subtype 7 (locally assigned) — dpid encoded by us
-            src_dpid = int.from_bytes(chassis_tlv.chassis_id, 'big')
-            # Port ID: subtype 7 — port_no encoded by us
+            # Validate magic prefix to reject external/foreign LLDP frames
+            chassis_data = chassis_tlv.chassis_id
+            if len(chassis_data) < 10 or chassis_data[:2] != self._LLDP_MAGIC:
+                logger.debug(
+                    "lldp_rejected_no_magic",
+                    raw_chassis=chassis_data.hex() if chassis_data else "empty"
+                )
+                return
+
+            src_dpid = int.from_bytes(chassis_data[2:], 'big')
             src_port = int.from_bytes(port_tlv.port_id, 'big')
-        except Exception:
+        except Exception as e:
+            logger.debug("lldp_parse_failed", error=str(e))
+            return
+
+        # Validate src_dpid is a known switch managed by this controller
+        if src_dpid not in self.datapaths:
+            logger.debug(
+                "lldp_rejected_unknown_dpid",
+                src_dpid=src_dpid,
+                src_port=src_port
+            )
             return
 
         if src_dpid == dst_dpid:
@@ -782,17 +809,23 @@ class EcoRouteController(app_manager.OSKenApp):
         parser = datapath.ofproto_parser
         dpid = datapath.id
 
+        # Generate locally-administered MAC from dpid (bit 1 of octet 0 = local)
+        src_mac = '02:ec:%02x:%02x:%02x:%02x' % (
+            (dpid >> 24) & 0xff, (dpid >> 16) & 0xff,
+            (dpid >> 8) & 0xff, dpid & 0xff
+        )
+
         # Build LLDP packet with dpid and port_no encoded
         pkt = packet.Packet()
         pkt.add_protocol(ethernet.ethernet(
             ethertype=0x88cc,
-            src='00:00:00:00:00:00',
+            src=src_mac,
             dst=lldp.LLDP_MAC_NEAREST_BRIDGE
         ))
 
         chassis_id = lldp.ChassisID(
             subtype=lldp.ChassisID.SUB_LOCALLY_ASSIGNED,
-            chassis_id=dpid.to_bytes(8, 'big')
+            chassis_id=self._LLDP_MAGIC + dpid.to_bytes(8, 'big')
         )
         port_id = lldp.PortID(
             subtype=lldp.PortID.SUB_LOCALLY_ASSIGNED,

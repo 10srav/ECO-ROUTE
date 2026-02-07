@@ -279,10 +279,11 @@ class ControllerClient:
 
         Throttled to avoid running multiple times per poll cycle.
         """
-        now = time.time()
-        if now - self._last_sim_time < self._sim_interval:
-            return  # Skip if called too recently
-        self._last_sim_time = now
+        with self._lock:
+            now = time.time()
+            if now - self._last_sim_time < self._sim_interval:
+                return  # Skip if called too recently
+            self._last_sim_time = now
 
         import random
         import numpy as np

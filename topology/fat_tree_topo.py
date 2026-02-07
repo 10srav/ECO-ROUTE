@@ -415,7 +415,8 @@ def run_topology(
         if "0% packet loss" in result:
             info(f"*** Cross-pod test passed: {h1.name} -> {h_last.name}\n")
         elif "received" in result:
-            info(f"*** Cross-pod test partial: {result.splitlines()[-1]}\n")
+            lines = result.splitlines()
+            info(f"*** Cross-pod test partial: {lines[-1] if lines else result}\n")
         else:
             info(f"*** Cross-pod test failed: {h1.name} -> {h_last.name}\n")
 

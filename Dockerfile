@@ -57,7 +57,7 @@ EXPOSE 6653 5000 8080
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:5000/api/health || exit 1
+    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:5000/api/health')" || exit 1
 
 # Default command - run controller using osken-manager (os-ken fork of ryu-manager)
 CMD ["osken-manager", "--observe-links", "controller/ecoroute_controller.py"]

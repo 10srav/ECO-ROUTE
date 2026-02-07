@@ -18,6 +18,12 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import structlog
 
+try:
+    from os_ken.lib import hub
+    _sleep = hub.sleep
+except ImportError:
+    _sleep = time.sleep
+
 from controller.energy_model import EnergyModel, PortState
 from controller.energy_router import EnergyAwareRouter, Flow, PathScore
 from controller.ewma_predictor import AdaptiveEWMAPredictor
@@ -176,8 +182,13 @@ class SleepManager:
         for check_dpid, check_port in [(src_dpid, src_port), (dst_dpid, dst_port)]:
             other_active = 0
             for (s, d), (sp, dp, _) in self.router._link_info.items():
+                # Check outgoing links from this switch
                 if s == check_dpid and sp != check_port:
                     if not self.energy_model.is_port_sleeping(s, sp):
+                        other_active += 1
+                # Check incoming links to this switch
+                elif d == check_dpid and dp != check_port:
+                    if not self.energy_model.is_port_sleeping(d, dp):
                         other_active += 1
             if other_active == 0:
                 return True
@@ -494,8 +505,8 @@ class SleepManager:
             self._wake_port(src_dpid, src_port)
             self._wake_port(dst_dpid, dst_port)
 
-            # Wait for wake latency
-            time.sleep(self.wake_latency_ms / 1000.0)
+            # Wait for wake latency (non-blocking in os_ken green thread context)
+            _sleep(self.wake_latency_ms / 1000.0)
 
             # Validate connectivity
             self._validate_link_connectivity(
@@ -554,8 +565,8 @@ class SleepManager:
 
         Checks packet loss is within acceptable limits.
         """
-        # Wait for validation period
-        time.sleep(self.validation_timeout)
+        # Wait for validation period (non-blocking in os_ken green thread context)
+        _sleep(self.validation_timeout)
 
         if self._get_packet_loss_callback:
             for flow_id in transition.flows_rerouted:

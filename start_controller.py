@@ -21,14 +21,17 @@ from os_ken.base.app_manager import AppManager
 from os_ken.app.wsgi import start_service
 from os_ken.lib import hub
 
+# Configure logging BEFORE cfg.CONF so warning handlers are available
+logging.basicConfig(level=logging.INFO)
+
 # Initialize os_ken CONF with defaults before any app loads.
 # Required for WSGI server (wsapi-host / wsapi-port) and other config opts.
 try:
     cfg.CONF(args=[], project='os_ken')
-except SystemExit:
-    pass
-
-logging.basicConfig(level=logging.INFO)
+except SystemExit as e:
+    logging.getLogger(__name__).warning("CONF init raised SystemExit (code=%s), continuing", e.code)
+    if e.code not in (None, 0):
+        raise
 
 
 def main():
@@ -51,13 +54,14 @@ def main():
     try:
         hub.joinall(services)
     finally:
-        app_mgr.close()
+        # Stop services first, then close the app manager
         for t in services:
             if hasattr(t, 'kill'):
                 t.kill()
             elif hasattr(t, 'cancel'):
                 t.cancel()
         hub.joinall(services)
+        app_mgr.close()
         gc.collect()
 
 
