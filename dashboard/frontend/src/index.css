@@ -199,7 +199,9 @@ body {
 
 .topology-link.sleeping {
   stroke: var(--accent-red);
-  stroke-dasharray: 5, 5;
+  stroke-dasharray: 6, 4;
+  stroke-width: 2.5;
+  opacity: 0.9;
 }
 
 /* Events Panel */

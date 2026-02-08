@@ -19,7 +19,7 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 import structlog
 
 try:
-    from os_ken.lib import hub
+    from controller.compat import hub
     _sleep = hub.sleep
 except ImportError:
     _sleep = time.sleep

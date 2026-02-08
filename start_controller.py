@@ -16,10 +16,16 @@ import os
 # Ensure project root is on the path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from os_ken import cfg
-from os_ken.base.app_manager import AppManager
-from os_ken.app.wsgi import start_service
-from os_ken.lib import hub
+from controller.compat import app_manager, hub, wsgi, _FRAMEWORK
+
+# Import cfg based on framework
+if _FRAMEWORK == "os_ken":
+    from os_ken import cfg
+else:
+    from ryu import cfg
+
+AppManager = app_manager.AppManager
+start_service = wsgi.start_service
 
 # Configure logging BEFORE cfg.CONF so warning handlers are available
 logging.basicConfig(level=logging.INFO)

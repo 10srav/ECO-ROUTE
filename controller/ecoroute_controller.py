@@ -28,21 +28,46 @@ from threading import Thread
 from typing import Dict, List, Optional, Set, Tuple
 
 import yaml
-from os_ken.base import app_manager
-from os_ken.controller import ofp_event
-from os_ken.controller.handler import (
+from webob import Response
+
+# Use compatibility shim so both os-ken and ryu work
+from controller.compat import (
+    app_manager,
+    ofp_event,
     CONFIG_DISPATCHER,
     DEAD_DISPATCHER,
     MAIN_DISPATCHER,
     set_ev_cls,
+    hub,
+    ofproto_v1_3,
+    topo_event,
+    get_all_link,
+    get_all_switch,
+    ControllerBase,
+    WSGIApplication,
+    route,
 )
-from os_ken.lib import hub
-from os_ken.lib.packet import arp, ethernet, icmp, ipv4, lldp, packet, tcp, udp
-from os_ken.ofproto import ofproto_v1_3
-from os_ken.topology import event as topo_event
-from os_ken.topology.api import get_all_link, get_all_switch
-from os_ken.app.wsgi import ControllerBase, WSGIApplication, route
-from webob import Response
+from controller.compat import (
+    packet_lib as packet_module,
+    ethernet as ethernet_mod,
+    arp as arp_mod,
+    ipv4 as ipv4_mod,
+    icmp as icmp_mod,
+    tcp as tcp_mod,
+    udp as udp_mod,
+    lldp as lldp_mod,
+)
+
+# Re-bind packet classes to match the original import style
+# (from os_ken.lib.packet import arp, ethernet, ..., packet)
+packet = packet_module
+ethernet = ethernet_mod
+arp = arp_mod
+ipv4 = ipv4_mod
+icmp = icmp_mod
+tcp = tcp_mod
+udp = udp_mod
+lldp = lldp_mod
 
 import structlog
 
@@ -324,8 +349,16 @@ class EcoRouteController(app_manager.OSKenApp):
         parser = datapath.ofproto_parser
         in_port = msg.match['in_port']
 
-        pkt = packet.Packet(msg.data)
-        eth = pkt.get_protocol(ethernet.ethernet)
+        try:
+            pkt = packet.Packet(msg.data)
+            eth = pkt.get_protocol(ethernet.ethernet)
+        except (UnicodeDecodeError, Exception) as e:
+            # Binary/malformed packets can cause decode errors in ryu/os-ken
+            logger.debug("packet_parse_error", dpid=dpid, in_port=in_port, error=str(e))
+            return
+
+        if eth is None:
+            return
 
         if eth.ethertype == 0x88cc:  # LLDP — parse for link discovery
             self._handle_lldp(dpid, in_port, pkt)

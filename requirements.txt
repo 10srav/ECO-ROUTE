@@ -1,8 +1,13 @@
 # EcoRoute SDN Project Dependencies
 # Python 3.8+ required
 
-# SDN Controller Framework (os-ken is a maintained fork of ryu)
-os-ken>=4.0.0
+# SDN Controller Framework
+# os-ken (maintained fork of ryu) is preferred, but ryu also works.
+# Install ONE of these:
+#   pip install os-ken    (recommended)
+#   pip install ryu       (legacy, also supported)
+os-ken>=4.0.0; python_version >= "3.12"
+ryu>=4.34; python_version < "3.12"
 
 # Network graph algorithms
 networkx>=3.1

@@ -513,8 +513,9 @@ function TopologyView({ topology }) {
             y2={target.y}
             className={`topology-link ${edge.sleeping ? 'sleeping' : 'active'}`}
             stroke={edge.sleeping ? '#ff4757' : '#00ff88'}
-            strokeOpacity={0.6}
-            strokeDasharray={edge.sleeping ? '4,3' : 'none'}
+            strokeOpacity={edge.sleeping ? 0.9 : 0.6}
+            strokeWidth={edge.sleeping ? 2.5 : 2}
+            strokeDasharray={edge.sleeping ? '6,4' : 'none'}
           />
         );
       })}
